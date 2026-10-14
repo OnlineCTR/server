@@ -4,5 +4,8 @@ x64/
 .vs/
 vcpkg_installed/
 result
-# this host's settings stay out of the image and the build context
+# hosts' settings (octr-server.env and any named copy of it) stay out of
+# the image and the build context
+octr-server.env*
+!octr-server.env.example
 *.env

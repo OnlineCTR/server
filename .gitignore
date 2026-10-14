@@ -12,7 +12,9 @@ ctr_srv.exe
 result
 result-*
 
-# This host's settings: secrets, never committed (the template is
-# octr-server.env.example)
+# Hosts' settings: secrets, never committed - octr-server.env and any
+# named copy of it (octr-server.env.usa, ...); only the template is
 octr-server.env
+octr-server.env.*
+!octr-server.env.example
 *.env

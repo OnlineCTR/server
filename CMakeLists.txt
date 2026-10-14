@@ -46,7 +46,12 @@ if(OCTR_HEARTBEAT)
     endif()
 endif()
 
-# Compiler options (GCC and Clang; Windows builds use Server.sln)
+# Compiler options (GCC and Clang; Windows builds use Server.sln). A plain
+# char is signed everywhere, as on x86 and in MSVC: ARM's default is unsigned,
+# and the server is built and run on ARM hosts too.
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(ctr_srv PRIVATE -fsigned-char)
+endif()
 if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     target_compile_options(ctr_srv PRIVATE -Wno-int-conversion -Wno-incompatible-function-pointer-types -Wno-implicit-function-declaration -Wno-return-type)
 elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")

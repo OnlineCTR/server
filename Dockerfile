@@ -6,7 +6,11 @@
 # OnlineCTR server in a container: docker compose up --build (compose.yml).
 # The server's settings come from octr-server.env at run time (compose
 # env_file; see octr-server.env.example) - never from the image.
-FROM i386/debian:bookworm-slim AS builder
+#
+# The host's own architecture (x86-64, ARM64, ...): Docker picks the matching
+# Debian image. (ClaudioBo: i386/debian, 32-bit x86 only, has no image an ARM
+# host can run.)
+FROM debian:bookworm-slim AS builder
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake build-essential libcurl4-openssl-dev \
@@ -20,7 +24,7 @@ RUN cmake -S . -B build && cmake --build build
 # than FROM scratch: libcurl drags in libssl, libcrypto, libz, libnghttp2,
 # libidn2, libpsl and more, and TLS verification needs a CA bundle that would
 # otherwise never receive updates. ENet is linked in (bundled, enet/).
-FROM i386/debian:bookworm-slim AS final
+FROM debian:bookworm-slim AS final
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libcurl4 ca-certificates \

@@ -2932,8 +2932,8 @@ static void PrintServerBanner(void)
 
 	// The licence notice (AGPL-3.0's Appropriate Legal Notices: the
 	// copyright, no warranty, the licence and where it is), with the
-	// attribution ADDITIONAL-TERMS asks every copy to keep. Lines kept under
-	// the console's width (ServerState_FirstBoot sizes it).
+	// attribution ADDITIONAL-TERMS asks every copy to keep. The console is
+	// sized for its longest line, the site's (ServerState_FirstBoot).
 	printf(" Copyright (C) 2024-2026 OnlineCTR Team (http://online-ctr.com/)\n"
 	       " Free software under the GNU AGPL-3.0, with the\n"
 	       " additional terms in ADDITIONAL-TERMS; see LICENSE.\n"
@@ -2957,7 +2957,9 @@ void ServerState_FirstBoot(int argc, char** argv)
 	HWND console = GetConsoleWindow();
 	RECT r;
 	GetWindowRect(console, &r); //stores the console's current dimensions
-	MoveWindow(console, r.left, r.top, 480, 240 + 35 + 80, TRUE);   // + the licence notice's 5 lines
+	// 580 wide: the licence notice's copyright line, 65 characters with the
+	// site's address, on one line; 80 taller for its 5 lines
+	MoveWindow(console, r.left, r.top, 580, 240 + 35 + 80, TRUE);
 #endif
 
 	int port;

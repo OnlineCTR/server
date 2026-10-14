@@ -1,8 +1,9 @@
 # OnlineCTR Server
 
-The dedicated server for OnlineCTR: online races for Crash Team Racing on
-the PlayStation, played through the OnlineCTR launcher. It hosts the rooms, relays the karts and
-weapons between the players, and referees the game modes.
+Official Website: [http://online-ctr.com/](http://online-ctr.com/)
+
+The dedicated server for OnlineCTR. Online races for Crash Team Racing on the PlayStation.
+It hosts the rooms, relays the karts and weapons between the players, and referees the game modes.
 
 ### Compiling
 
@@ -78,4 +79,4 @@ Special thanks to Niko. Extra thanks to ClaudioBo, BlizzrdBall and PedroHLC.
 
 Built on [CTR-ModSDK](https://github.com/CTR-tools/CTR-ModSDK). Original Design and Source Code Copyright (C) Naughty Dog.
 
-OnlineCTR Copyright (C) 2024-2026 OnlineCTR team | http://online-ctr.com/
+OnlineCTR Copyright (C) 2024-2026 OnlineCTR Team
