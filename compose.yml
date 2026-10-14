@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2024-2026 OnlineCTR Team.
+# Licensed under the GNU AGPL-3.0 (LICENSE), with the additional terms in
+# ADDITIONAL-TERMS under its section 7. ABSOLUTELY NO WARRANTY.
+
+services:
+  ctr-psx-server:
+    build: .
+    ports:
+      # Change this port to whatever you like
+      - "64001:64001/udp"
+    # This host's settings: copy octr-server.env.example to octr-server.env
+    # and fill it in first (git-ignored; never commit it).
+    env_file: octr-server.env
+    restart: unless-stopped
+    tty: true

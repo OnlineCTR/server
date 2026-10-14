@@ -1,0 +1,12 @@
+* text=auto
+*.c text
+*.h text
+*.sh text eol=lf
+*.nix text eol=lf
+*.yml text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+*.env.example text eol=lf
+*.sln text eol=crlf
+*.vcxproj text eol=crlf
+*.vcxproj.filters text eol=crlf

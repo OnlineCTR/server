@@ -1,0 +1,8 @@
+.git
+build/
+x64/
+.vs/
+vcpkg_installed/
+result
+# this host's settings stay out of the image and the build context
+*.env

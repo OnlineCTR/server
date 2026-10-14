@@ -1,0 +1,15 @@
+{
+  "name": "onlinectr-server",
+  "version-string": "1.0.0",
+  "description": "Dependencies for the OnlineCTR dedicated server (Windows/MSVC build).",
+  "license": "AGPL-3.0-only",
+  "dependencies": [
+    {
+      "name": "curl",
+      "default-features": false,
+      "features": [
+        "ssl"
+      ]
+    }
+  ]
+}
