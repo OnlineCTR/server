@@ -90,6 +90,9 @@ shows `Heartbeat: Enabled (updating as "<your server ID>" ...)`.
 new release tag (`v1103`, `v1104`, ...), checks the code out at exactly that tag, and rebuilds and
 restarts the server. Releases are tags, not `main`: `main` can be ahead of what players are running.
 
+Setups that follow a branch rather than a tag (a Nix input, for example) should use `stable`: it
+always points at the newest release.
+
 Copy the script out of the server's folder and run the copy, giving it that folder. Inside the
 folder, checking out an older release would delete it and a newer release would refuse to
 overwrite it.
