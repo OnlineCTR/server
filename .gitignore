@@ -18,3 +18,6 @@ octr-server.env
 octr-server.env.*
 !octr-server.env.example
 *.env
+
+# autodeploy.sh's note of the release deployed here
+.last-deployed-tag

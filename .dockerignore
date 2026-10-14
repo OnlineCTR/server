@@ -9,3 +9,4 @@ result
 octr-server.env*
 !octr-server.env.example
 *.env
+.last-deployed-tag

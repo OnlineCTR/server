@@ -5,6 +5,8 @@ Official Website: [http://online-ctr.com/](http://online-ctr.com/)
 The dedicated server for OnlineCTR. Online races for Crash Team Racing on the PlayStation.
 It hosts the rooms, relays the karts and weapons between the players, and referees the game modes.
 
+![The OnlineCTR server's console when it starts](screenshot.png)
+
 ### Compiling
 
 For Windows open `Server.sln` with Visual Studio 2022 (x64). The heartbeat needs libcurl, which
@@ -56,6 +58,36 @@ heartbeat is off and the server runs unlisted.
 The server's own settings - connections per address, the lobby and race clocks, limits - are in
 `SV_config.h`.
 
+### Automatic Updates (Linux)
+
+`autodeploy.sh` keeps a Docker host on the newest release. Every few minutes it checks GitHub for a
+new release tag (`v1103`, `v1104`, ...), checks the code out at exactly that tag, and rebuilds and
+restarts the server. Releases are tags, not `main`: `main` can be ahead of what players are running.
+
+Copy the script out of the server's folder and run the copy, giving it that folder. Inside the
+folder, checking out an older release would delete it and a newer release would refuse to
+overwrite it.
+
+```sh
+cp autodeploy.sh ~/octr-autodeploy.sh
+bash ~/octr-autodeploy.sh /home/ubuntu/ctronline        # first deploy (your server folder)
+crontab -e
+```
+
+Then add this line to the crontab (with your server folder):
+
+```
+*/5 * * * * flock -n /tmp/octr-autodeploy.lock bash $HOME/octr-autodeploy.sh /home/ubuntu/ctronline >> $HOME/octr-autodeploy.log 2>&1
+```
+
+- `octr-server.env` must be in the server folder first (see Configuration).
+- The script runs `sudo docker compose`, so the user needs sudo without a password (Ubuntu cloud
+  servers' `ubuntu` user has it). Otherwise add the user to the `docker` group and remove `sudo`
+  from your copy.
+- Local edits in the server folder stop the checkout: undo them with `git checkout -- .`.
+- `--force` after the folder redeploys the current release.
+- A deploy restarts the server, ending any races in progress.
+
 ### Versions
 
 `global.h` is the protocol header the server shares with the game (ROM) and the PC client. It
@@ -68,7 +100,7 @@ the server's console banner as `Build 1103, Server 1103`.
 
 ### Licence
 
-GPL-3.0 (`LICENSE`). ENet, bundled in `enet/`, is MIT-licensed (`enet/LICENSE`).
+AGPL-3.0 (`LICENSE`). ENet, bundled in `enet/`, is MIT-licensed (`enet/LICENSE`).
 
 You must follow the license terms and additional agreement in `ADDITIONAL-TERMS`
 
@@ -79,4 +111,4 @@ Special thanks to Niko. Extra thanks to ClaudioBo, BlizzrdBall and PedroHLC.
 
 Built on [CTR-ModSDK](https://github.com/CTR-tools/CTR-ModSDK). Original Design and Source Code Copyright (C) Naughty Dog.
 
-OnlineCTR Copyright (C) 2024-2026 OnlineCTR Team
+OnlineCTR Copyright (C) 2024-2026 OnlineCTR Team.
