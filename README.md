@@ -58,6 +58,32 @@ heartbeat is off and the server runs unlisted.
 The server's own settings - connections per address, the lobby and race clocks, limits - are in
 `SV_config.h`.
 
+### Running on Windows Servers
+
+Build `Server.sln` (Release, x64) from a release tag, then copy these into one folder on the server,
+for example `C:\OnlineCTR`:
+
+- `Server.exe`, `libcurl.dll` and `z.dll` from `x64\Release`
+- `run.ps1` from this repository
+- `octr-server.env`, made from `octr-server.env.example` (see Configuration)
+
+The server also needs the Microsoft Visual C++ 2015-2022 Redistributable (x64), which most Windows
+installs already have. Allow its UDP port through Windows Firewall once (as an administrator):
+
+```powershell
+New-NetFirewallRule -DisplayName "OnlineCTR server" -Direction Inbound -Protocol UDP -LocalPort 64001 -Action Allow
+```
+
+Then start it with your port:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\OnlineCTR\run.ps1 -Port 64001
+```
+
+`run.ps1` loads the settings from `octr-server.env`, the same file the Linux hosts use, and starts
+`Server.exe` on that port (64001 when no `-Port` is given). With the heartbeat set up, the console
+shows `Heartbeat: Enabled (updating as "<your server ID>" ...)`.
+
 ### Automatic Updates (Linux)
 
 `autodeploy.sh` keeps a Docker host on the newest release. Every few minutes it checks GitHub for a
