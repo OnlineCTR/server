@@ -75,6 +75,18 @@
 #define LOBBY_JOIN_CLOSE_SECONDS 10
 #endif
 
+// How long a room waits on its players to load once the race is started
+// (SG_STARTLOADING). Whoever has not reached the start line by then
+// (CG_STARTRACE) is removed as an idle player is (DISCONNECT_REASON_IDLE),
+// and the race goes on for the rest. A normal load - the start countdown,
+// the track off the disc, its fly-in - takes a fraction of this. Without it
+// one player who never loaded held the whole room on WAITING FOR PLAYERS
+// until they left: the start is sent once, and on 16 Oct 2026 a player's
+// CANCEL undid it on their machine.
+#ifndef LOAD_TIMEOUT_SECONDS
+#define LOAD_TIMEOUT_SECONDS 60
+#endif
+
 // ------------------------------------------------- contested weapon touches
 
 // A touch marked as waiting is held (WeaponHold_*, SV_main.c) until a touch

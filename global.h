@@ -25,8 +25,17 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1103
-#define SERVER_VERSION 1103
+#define VERSION 1104
+#define SERVER_VERSION 1104
+
+// The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
+// defined before it includes this header; 1104). One from another release
+// than this header must not build: it would relay messages of a size and
+// meaning this header no longer gives them (an 1103 relay of 1104's kart
+// message sends no lap word, and every kart's place goes wrong).
+#if defined(SV_PROTOCOL) && (SV_PROTOCOL != SERVER_VERSION)
+#error "global.h and SV_main.c are from different releases: replace both with the ones from this release's zip (see README)"
+#endif
 
 // The weapons' sync (netWeapons.c): the weapon message carries the
 // shooter's pose, shot count and target, and SG/CG_WEAPONEVENT what
@@ -64,6 +73,12 @@
 // catch a stale global.h.
 #define NET_VOTING 1
 
+// The kart message's lap word and number (CG/SG_EverythingKart.lap and .seq,
+// NET_LAP_* below; 1104): every machine ranks the other players' karts by
+// their own screens' laps and progress, and finishes them when the server
+// says so (netLap.c). SV_main.c checks for this to catch a stale global.h.
+#define NET_KART_LAPS 1
+
 // A vote: VOTE_NONE (the host picks, or no pick due), VOTE_TRACK, VOTE_LAPS.
 // Each runs VOTE_SECONDS, or until every player has voted (the server's
 // --votesecs, for testing), over the VOTE_TRACKS race tracks of the track
@@ -87,13 +102,17 @@
 #define CRASH_SELF_TEST 0
 
 // ModsC, the code block in expansion RAM (ModsC.c): where it is linked and
-// loaded to, its ceiling (the kart model buffer starts there, kartView.c),
-// and the disc file it travels in - lang/ja.lng, bigfile.txt line 235,
-// which the USA build never reads.
-// (kartVideo.c keeps the video decoder's table just under it, at 0x8078F000,
-// which is the allocator's ceiling.)
+// loaded to, its ceiling, and the disc file it travels in - lang/ja.lng,
+// bigfile.txt line 235, which the USA build never reads.
+// (kartVideo.c keeps the video decoder's table just under it, from
+// 0x8078F000, the kart model cache's end - kartCache.c, from the
+// allocator's ceiling at 0x80720000.) The ceiling: the Saffi flame tables
+// (saffiFlame.h); a whole number of sectors from MODSC_ADDR, so the block's
+// whole-sector read stays under it (saffiFlame.c checks both). 0x807B0000
+// until 16 Oct 2026, under the kart view's old 48 KB model buffer - unused
+// since the models moved to their cache.
 #define MODSC_ADDR 0x807A0000
-#define MODSC_END  0x807B0000
+#define MODSC_END  0x807BC000
 #define BI_MODSC   234
 
 // The game modes' knockout chime (leaverSound.c): KART.HWL sample 156, raw
@@ -225,6 +244,17 @@
 // a number in a string literal ("/" OCTR_STR(MAX_NUM_PLAYERS))
 #define OCTR_STR2(x) #x
 #define OCTR_STR(x)  OCTR_STR2(x)
+
+// octr->menuMusic, the launcher's Menu Theme Music as the client hands it
+// on: off, the menu's own theme, or MENU_MUSIC_RANDOM + a race track's
+// levelID, the client's pick, whose song the lobby then plays (its bank
+// levelID + 1, its song levelID: data.levBank_FX, levBank_Song). The ROM
+// before Random only tested it against 0, so any pick plays the theme there.
+#define MENU_MUSIC_OFF     0
+#define MENU_MUSIC_DEFAULT 1
+#define MENU_MUSIC_RANDOM  2
+#define MENU_MUSIC_TRACKS  18                  // the picks the ROM takes: the race tracks, to TURBO_TRACK
+#define MENU_MUSIC_BANK    0x20                // the menu theme's own bank (Music_AsyncParseBanks)
 
  // 2 seconds to be very tolerant on client
 #ifdef USE_60FPS
@@ -454,10 +484,10 @@ struct OnlineCTR
 	// The launcher's options, written by the PC client every frame from its
 	// command line (--music, --sfx, --menu-music; CL_main.cpp), so they
 	// survive the entry hook's memset: the music and sound effect volumes
-	// as percentages, whether the menu's theme music plays, and a flag that
-	// says the three are in, since zeros would otherwise read as silence.
-	// Applied by the ROM every frame (Options_Apply, options.c). Same
-	// placement rule: appended, ints after ints, no padding.
+	// as percentages, what plays in the menus (MENU_MUSIC_*, below), and a
+	// flag that says the three are in, since zeros would otherwise read as
+	// silence. Applied by the ROM every frame (Options_Apply, options.c).
+	// Same placement rule: appended, ints after ints, no padding.
 	int musicVolume;
 	int sfxVolume;
 	int menuMusic;
@@ -797,6 +827,33 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define ROUND_FLAG_OVER       2   // the round has ended (its last verdict in)
 #define ROUND_FLAG_ON         4   // this race is a round (SG_STARTLOADING's code non-zero)
 
+// A kart's lap, behind-the-line flag and progress in one word (1104;
+// netLap.c), as its own screen has them: the other machines rank their copy
+// of it by these, not by their own reading of its positions - which a
+// crossing missed in a gap or an odd stretch of track used to leave a lap out
+// until it finished. Bits 0-19 driver->distanceToFinish_curr, signed
+// (VehLap_UpdateProgress's % takes it under 0 just past a node; a track is at
+// most 8 * 0xFFFF, the restart points' unsigned short, so 20 bits hold it),
+// 20 the behind-the-line flag (actionsFlagSet 0x1000000), 21-27 lapIndex
+// (to TAG_LAPS), 31 a word is in (0: none yet). One aligned word, written in
+// one store and read in one load each way, so a lap is never paired with
+// another step's progress: at the line that would be a whole lap out.
+#define NET_LAP_IN     0x80000000u
+#define NET_LAP_BEHIND 0x00100000u
+#define NET_LAP_PACK(lap, behind, dist) (NET_LAP_IN | (((unsigned int)(lap) & 0x7fu) << 21) | \
+	((behind) ? NET_LAP_BEHIND : 0u) | ((unsigned int)(dist) & 0xfffffu))
+#define NET_LAP_LAP(w)  ((int)(((w) >> 21) & 0x7f))
+#define NET_LAP_DIST(w) (((int)((w) << 12)) >> 12)
+// The words, one a kart slot, in the game tracker's free 2P-4P pixel-LOD
+// area (include/common.h): slot 0 this machine's kart's, written by the ROM
+// each race step (NetLap_Step) for the client to send (CG_RACEDATA's lap);
+// 1 to MAX_NUM_PLAYERS - 1 the others', written by the client alone from
+// SG_RACEDATA's and read by the ROM alone. All zeroed by the ROM at each
+// race's load (NetLap_RaceLoad), before the client can write any.
+#define NET_LAP_ADDR(slot) (0x80096B20u + 0x12C4u + 4u * (unsigned int)(slot))
+STATIC_ASSERT2(0x12C4 + 4 * MAX_NUM_PLAYERS <= 0x136C, "NET_LAP words run into DecalMP[11]'s FinalizeInit word (include/common.h)");
+STATIC_ASSERT2(TAG_LAPS <= 0x7f, "NET_LAP_PACK holds 7 bits of lap");
+
 // From gameModes.c (ModsC), for the HUD and the other ModsC files (ROM only;
 // all 0 / -1 outside a round): the room row of this race's round (-1 none);
 // kart slot i's player out / placed (any cause) / their ROUND_CAUSE_* (0
@@ -1092,13 +1149,24 @@ struct SG_EverythingKart
 	// byte[10]: the kart's flame colour as its own screen shows it
 	// (FLAME_*, the sender's CG_RACEDATA flame; 1102)
 	unsigned char flame;
-	unsigned char spare;
+
+	// byte[11]: the sender's number for this message (its CG_RACEDATA seq,
+	// 1-255 round again, never 0; 1104; was spare). Kart messages come
+	// unsequenced: the others take the lap word below only from one newer
+	// than the last they took (KartSeq_Newer, CL_main.cpp), and none from a
+	// 0 - what a relay that does not know the field leaves there.
+	unsigned char seq;
 
 	// byte[12-13]: the kart's last hurt (NET_HURT_*, the sender's
 	// CG_RACEDATA hurt; 1103)
 	unsigned short hurt;
 
-	// 14 bytes
+	// byte[14-17]: the kart's lap, behind-the-line flag and progress as its
+	// own screen has them (NET_LAP_*, the sender's CG_RACEDATA lap; 1104),
+	// its bytes as sent
+	unsigned char lap[4];
+
+	// 18 bytes
 };
 
 struct SG_MessageWeapon
@@ -1171,7 +1239,7 @@ STATIC_ASSERT2(sizeof(struct SG_MessageClientStatus) == 2, "Size of SG_MessageCl
 STATIC_ASSERT2(sizeof(struct SG_MessageName) == 2 + NAME_LEN + 1, "Size of SG_MessageName must be 2 + NAME_LEN + 1 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageCharacter) == 2, "Size of SG_MessageCharacter must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageTrack) == 2, "Size of SG_MessageTrack must be 2 bytes");
-STATIC_ASSERT2(sizeof(struct SG_EverythingKart) == 14, "Size of SG_EverythingKart must be 14 bytes");
+STATIC_ASSERT2(sizeof(struct SG_EverythingKart) == 18, "Size of SG_EverythingKart must be 18 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageWeapon) == 16, "Size of SG_MessageWeapon must be 16 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageWeaponEvent) == 4, "Size of SG_MessageWeaponEvent must be 4 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageEndRace) == 12, "Size of SG_MessageEndRace must be 12 bytes");
@@ -1318,7 +1386,19 @@ struct CG_EverythingKart
 	// byte[10-11]: the kart's last hurt (NET_HURT_*, octr->hurtOwn; 1103)
 	unsigned short hurt;
 
-	// 12 bytes
+	// byte[12-15]: the kart's lap, behind-the-line flag and progress
+	// (NET_LAP_*: the ROM's word for this kart, NET_LAP_ADDR(0), as it is;
+	// 1104). Bytes, not an int: the struct keeps its 2-byte alignment and
+	// size on every compiler, and only memcpy touches it.
+	unsigned char lap[4];
+
+	// byte[16]: this message's number, one up on the last, 1-255 round
+	// again (0 is skipped: SG_EverythingKart.seq), relayed as SG_RACEDATA's
+	// seq; 1104
+	unsigned char seq;
+	unsigned char spare2;
+
+	// 18 bytes
 };
 
 struct CG_MessageWeapon
@@ -1397,7 +1477,7 @@ STATIC_ASSERT2(sizeof(struct CG_MessageRoom) == 4, "Size of CG_MessageRoom must 
 STATIC_ASSERT2(sizeof(struct CG_MessageName) == 1 + NAME_LEN + 1, "Size of CG_MessageName must be 1 + NAME_LEN + 1 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageCharacter) == 2, "Size of CG_MessageCharacter must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageTrack) == 2, "Size of CG_MessageTrack must be 2 bytes");
-STATIC_ASSERT2(sizeof(struct CG_EverythingKart) == 12, "Size of CG_EverythingKart must be 12 bytes");
+STATIC_ASSERT2(sizeof(struct CG_EverythingKart) == 18, "Size of CG_EverythingKart must be 18 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageWeapon) == 16, "Size of CG_MessageWeapon must be 16 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageWeaponEvent) == 4, "Size of CG_MessageWeaponEvent must be 4 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageHostAction) == 2 + NAME_LEN, "Size of CG_MessageHostAction must be 2 + NAME_LEN bytes");

@@ -18,15 +18,19 @@
 #include <enet/enet.h>
 #include "malloc.h"
 
-// Shared protocol header. A quoted include searches this directory first, so a
-// global.h placed next to the sources (which is what the release zip ships)
-// wins; otherwise the include path set in CMakeLists.txt / Server.vcxproj
-// resolves it to decompile/General/AltMods/OnlineCTR/global.h in the SDK tree.
+// Shared protocol header: the global.h next to these sources (the release
+// zip ships it; CMakeLists.txt and Server.vcxproj add no other include path
+// for it), a copy of decompile/General/AltMods/OnlineCTR/global.h in the
+// ModSDK.
 // Also set by the project (vcxproj), so that IntelliSense reads global.h
 // the way it is compiled here; guarded for the builds that do not.
 #ifndef WINDOWS_INCLUDE
 #define WINDOWS_INCLUDE
 #endif
+// The protocol this file was written for: global.h refuses to build with
+// another release's (SERVER_VERSION), which would have this relay messages
+// of a size and meaning it does not know.
+#define SV_PROTOCOL 1104
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
@@ -56,6 +60,12 @@
 #endif
 #if !defined(MAX_NUM_PLAYERS) || (MAX_NUM_PLAYERS != 12)
 #error "global.h is not the 12-seat header SV_main.c was written against: replace it with the global.h from this release's zip (see README)"
+#endif
+// The kart message's lap word and number (CG/SG_EverythingKart.lap, .seq,
+// NET_LAP_*): 1104. Without it the relay below names fields an older
+// header does not have.
+#if !defined(NET_KART_LAPS) || (NET_KART_LAPS < 1)
+#error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 
 // The server's own settings: connections, clocks, limits (public; nothing
@@ -187,6 +197,11 @@ typedef struct
 	// still going. Same wrap-safe arithmetic as endTime.
 	enet_uint32 firstEndTime;
 
+	// enet_time_get() when SG_STARTLOADING went out, 0 before it and once the
+	// load's time is up: whoever has not loaded LOAD_TIMEOUT_SECONDS after it
+	// is removed (ServerState_Tick). Same wrap-safe arithmetic as endTime.
+	enet_uint32 loadStartAt;
+
 	// The game modes' round this race (Round_*), server-only. roundOn: the
 	// race loaded as a round (SG_STARTLOADING's code was not 0); roundGreenAt:
 	// when its green light shows (SG_STARTRACE + the lights, enet_time_get()
@@ -273,6 +288,7 @@ static struct
 static int kickBanSeconds = KICK_BAN_SECONDS;   // --kickban: shorter, for testing
 static int voteSeconds = VOTE_SECONDS;           // --votesecs: shorter, for testing
 static int tagSeconds = TAG_SECONDS;             // --tagsecs: TAG's clock, shorter for testing
+static int loadSeconds = LOAD_TIMEOUT_SECONDS;   // --loadsecs: the wait on a load, shorter for testing
 static int tagFirst = -1;                        // --tagfirst: TAG's first "it" by client ID, for testing (-1 at random)
 
 static void KickBan_Add(enet_uint32 ip, int room)
@@ -2061,6 +2077,17 @@ static int WeaponHold_Claim(RoomInfo* ri, ENetPeer* peer, int peerID, struct CG_
 	return 1;
 }
 
+// ProcessReceiveEvent builds each relayed message in one stack buffer
+// (sgBuffer) and casts it to the message: every one it builds there has to
+// fit. 16 bytes until 1104, when the kart message grew to 18 (its lap word).
+#define SG_BUFFER_BYTES 32
+STATIC_ASSERT2(sizeof(struct SG_EverythingKart) <= SG_BUFFER_BYTES, "sgBuffer: SG_EverythingKart");
+STATIC_ASSERT2(sizeof(struct SG_MessageWeapon) <= SG_BUFFER_BYTES, "sgBuffer: SG_MessageWeapon");
+STATIC_ASSERT2(sizeof(struct SG_MessageWeaponEvent) <= SG_BUFFER_BYTES, "sgBuffer: SG_MessageWeaponEvent");
+STATIC_ASSERT2(sizeof(struct SG_MessageEndRace) <= SG_BUFFER_BYTES, "sgBuffer: SG_MessageEndRace");
+STATIC_ASSERT2(sizeof(struct SG_MessageName) <= SG_BUFFER_BYTES, "sgBuffer: SG_MessageName");
+STATIC_ASSERT2(sizeof(struct SG_MessageCharacter) <= SG_BUFFER_BYTES, "sgBuffer: SG_MessageCharacter");
+
 void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 	int peerID = -1;
@@ -2077,7 +2104,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 	GetDriverFromRace(peer, &ri, &peerID);
 
 	struct CG_Header* recvBuf = (struct CG_Header*)packet->data;
-	char sgBuffer[16];
+	char sgBuffer[SG_BUFFER_BYTES];
 	memset(sgBuffer, 0, sizeof(sgBuffer));
 
 	if (((struct CG_Header*)recvBuf)->type != CG_JOINROOM)
@@ -2613,6 +2640,13 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// the kart with this message's position
 			s->hurt = r->hurt;
 
+			// its lap, behind-the-line flag and progress as its own screen has
+			// them (NET_LAP_*, 1104), and the message's number: the others rank
+			// their copy of the kart by the newest (netLap.c; the client's
+			// KartSeq_Newer). As they came: the sender's word, as its position is.
+			memcpy(s->lap, r->lap, sizeof(s->lap));
+			s->seq = r->seq;
+
 			broadcastToPeersUnreliable(ri, s, sizeof(struct SG_EverythingKart));
 			break;
 		}
@@ -3008,6 +3042,21 @@ void ServerState_FirstBoot(int argc, char** argv)
 				exit(EXIT_FAILURE);
 			}
 		}
+		else if (strcmp(argv[i], "--loadsecs") == 0)
+		{
+			// seconds a room waits on its players to load (LOAD_TIMEOUT_SECONDS)
+			if (i + 1 < argc)
+			{
+				loadSeconds = atoi(argv[i + 1]);
+				if (loadSeconds < 1) loadSeconds = 1;
+				i++;
+			}
+			else
+			{
+				fprintf(stderr, "Error: --loadsecs requires a value\n");
+				exit(EXIT_FAILURE);
+			}
+		}
 		else if (strcmp(argv[i], "--kickban") == 0)
 		{
 			// seconds a kicked player is kept out of the room (KICK_BAN_SECONDS)
@@ -3389,6 +3438,38 @@ void ServerState_Tick()
 				sg.type = SG_STARTLOADING;
 				sg.padding = Round_Begin(ri) & 0xF;
 				broadcastToPeersReliable(ri, &sg, sizeof(struct SG_Header));
+
+				// the load's clock (LOAD_TIMEOUT_SECONDS, below)
+				ri->loadStartAt = IdleNow();
+				int loading = 0;
+				for (int j = 0; j < MAX_CLIENTS; j++)
+					if (ri->peerInfos[j].peer != 0) loading++;
+				PrintPrefix(r + 1);
+				printf("Race loading: %d player%s\n", loading, loading == 1 ? "" : "s");
+			}
+		}
+
+		// The load's time up (LOAD_TIMEOUT_SECONDS, SV_config.h): whoever has
+		// not reached the start line is removed, as an idle player is, and the
+		// race goes on for the rest - ProcessDisconnectEvent counts them in
+		// (boolRaceSelf) once the disconnect lands. Once a race: a disconnect
+		// lands by ENet's own timeout at the latest.
+		if (ri->boolLoadAll && !ri->boolRaceAll && ri->loadStartAt != 0 &&
+			(int)(enet_time_get() - ri->loadStartAt) >= loadSeconds * 1000)
+		{
+			ri->loadStartAt = 0;
+			for (int j = 0; j < MAX_CLIENTS; j++)
+			{
+				PeerInfo* pi = &ri->peerInfos[j];
+				if (pi->peer == 0 || pi->boolRaceSelf)
+					continue;
+				if (pi->peer->state != ENET_PEER_STATE_CONNECTED)
+					continue;
+
+				PrintPrefix(r + 1);
+				printf("Player %.*s (%d) did not load in %ds, removed\n",
+					NAME_LEN, &pi->name[0], j, loadSeconds);
+				enet_peer_disconnect(pi->peer, DISCONNECT_REASON_IDLE);
 			}
 		}
 
