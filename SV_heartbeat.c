@@ -212,6 +212,7 @@ static void hmac_sha256(const char* key, const char* msg, char outHex[65])
 
 static octr_mutex   g_lock;
 static OctrStatus   g_status;
+static int          g_published = 0; /* g_status has been published (guarded by g_lock) */
 static int          g_running = 0;
 static char         g_url[512];
 static char         g_secret[256];
@@ -496,6 +497,21 @@ static void* worker(void* arg)
 #endif
 {
 	(void)arg;
+
+	/* The first post waits for the main loop's first Heartbeat_Publish (its
+	   first tick, right after start-up). Posted at once, it carried the
+	   zeroed status - version 0, no players - and the site showed that for a
+	   whole interval after every restart. */
+	for (;;)
+	{
+		int published;
+		MUTEX_LOCK(&g_lock);
+		published = g_published;
+		MUTEX_UNLOCK(&g_lock);
+		if (published || !g_running) break;
+		SLEEP_SEC(1);
+	}
+
 	while (g_running)
 	{
 		post_once();
@@ -608,6 +624,7 @@ void Heartbeat_Publish(const OctrStatus* status)
 
 	MUTEX_LOCK(&g_lock);
 	g_status = *status;
+	g_published = 1;
 	MUTEX_UNLOCK(&g_lock);
 }
 

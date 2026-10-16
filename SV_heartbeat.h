@@ -18,7 +18,7 @@
  * Threading: Heartbeat_Publish() is called from the main tick loop and only
  * copies a small struct under a lock. All network I/O happens on a worker
  * thread. This matters more than it looks - the tick loop is
- * "while(1) { usleep(1); ServerState_Tick(); }", and stalling it delays
+ * "while (!g_stopSignal) { usleep(1); ServerState_Tick(); }", and stalling it delays
  * windowsClientSync updates, which is exactly what trips the PS1-side
  * frames_unsynced disconnect detector. A blocking TLS handshake in the tick
  * loop would kick players.

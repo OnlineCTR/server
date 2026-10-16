@@ -31,6 +31,16 @@
 #define KICK_BANS 64
 #endif
 
+// The port the prompt offers when no -p is given, taken by Enter alone
+// (AskPort, SV_main.c). Above 1023, which needs root on Linux and macOS,
+// and clear of the blocks Windows reserves from 49152 up for Hyper-V, WSL
+// and Docker (a player's 64001 was in one, 16 Oct 2026) and of Linux's
+// ephemeral ports (32768 to 60999). The launcher's Help > Private Server
+// recommends the same. The official servers keep theirs, given with -p.
+#ifndef DEFAULT_PORT
+#define DEFAULT_PORT 5501
+#endif
+
 // ----------------------------------------------------------------- clocks
 
 // Seconds a finished room sits on the results screen before everybody is sent

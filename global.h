@@ -25,11 +25,11 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1104
-#define SERVER_VERSION 1104
+#define VERSION 1105
+#define SERVER_VERSION 1105
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
-// defined before it includes this header; 1104). One from another release
+// defined before it includes this header; 1105). One from another release
 // than this header must not build: it would relay messages of a size and
 // meaning this header no longer gives them (an 1103 relay of 1104's kart
 // message sends no lap word, and every kart's place goes wrong).
@@ -197,7 +197,7 @@
 #define ROOM_OPEN_INDEX(rn) ((rn) < ROOM_PAGES_OPEN * ROOM_PAGE_ROWS)
 // a room list row's text, "TAG YOU'RE IT - 12/12", with its 0 and the space
 // menu.c writes after the count and cuts off beside two digits; and a
-// region list row's, "SINGAPORE - 192 PLAYERS" and its 0 (ServerList_Rows,
+// region list row's, "SINGAPORE - 999 ON 999MS" and its 0 (ServerList_Rows,
 // home.c), which share the buffer (roomRows, in Mods4.c)
 #define ROOM_LABEL_SIZE 26
 
@@ -565,9 +565,10 @@ struct OnlineCTR
 	// the client's status queries every few seconds while on the server
 	// list state (ServerPing_Tick, CL_main.cpp). -1 while it is being asked
 	// with nothing to show yet, PING_NA where the last ask went unanswered
-	// (an old server that does not answer the query, one down); -1 too for
-	// those never asked: a server not open, the private room. Written by the
-	// client every loop.
+	// (an old server that does not answer the query, one down), PING_UPDATE
+	// where the answer named another SERVER_VERSION; -1 too for those never
+	// asked: a server not open, the private room. Written by the client
+	// every loop.
 	int serverPing[8];
 
 	// The room's vote for the track and laps (vote.c), from the server's
@@ -723,6 +724,14 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define PING_NA_SECONDS 15
 #define PING_NA_STEPS   (PING_NA_SECONDS * 30)
 #define PING_NA         (-2)
+
+// ...and UPDATE REQ. in red, in place of the players and the round trip, on
+// the server list, for a server whose answer to the status query names
+// another SERVER_VERSION than this client's (Matt, 1105): the two cannot
+// play together until one of them updates (octr->serverPing, from the
+// client's ServerPing_Tick; home.c ServerList_Rows). It stays up while the
+// next query is out, rather than the waiting dots.
+#define PING_UPDATE     (-3)
 
 // octr->backRequest
 #define BACK_NONE          0

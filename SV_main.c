@@ -15,6 +15,11 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <signal.h>
+#include <errno.h> // why a port could not be opened (PrintPortTrouble)
+#ifndef __WINDOWS__
+#include <unistd.h> // _exit
+#endif
 #include <enet/enet.h>
 #include "malloc.h"
 
@@ -30,7 +35,7 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1104
+#define SV_PROTOCOL 1105
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
@@ -2983,6 +2988,130 @@ static void PrintServerBanner(void)
 #include "SV_backfill.h"
 #endif
 
+// The port typed at the prompt, asked for until it is one: a number from 1
+// to 65535, or Enter alone for DEFAULT_PORT (SV_config.h). A whole line is
+// read, and thrown away with whatever was wrong with it (scanf left a typing
+// slip in the input, to fail on for ever). No input left - nothing piped
+// in, no console - ends the server: no port is coming.
+static int AskPort(void)
+{
+	char line[64];
+
+	for (;;)
+	{
+		char* start;
+		char* end;
+		long port;
+
+		printf("Enter Port (press Enter for %d): ", DEFAULT_PORT);
+		fflush(stdout);
+
+		if (!fgets(line, sizeof(line), stdin))
+		{
+			fprintf(stderr, "\nError: No port given (the input is closed); start the server with -p <port>\n");
+			exit(EXIT_FAILURE);
+		}
+
+		// the rest of a line too long for the buffer goes with it
+		if (!strchr(line, '\n'))
+		{
+			int c;
+			while ((c = getchar()) != '\n' && c != EOF)
+				;
+		}
+
+		// Enter alone (or only spaces): the default
+		for (start = line; isspace((unsigned char)*start); start++)
+			;
+		if (*start == 0)
+			return DEFAULT_PORT;
+
+		port = strtol(start, &end, 10);
+		while (isspace((unsigned char)*end))
+			end++;
+
+		if (end != start && *end == 0 && port >= 1 && port <= 65535)
+			return (int)port;
+
+		printf("Error: A port is a number from 1 to 65535\n");
+	}
+}
+
+// Why the port could not be opened, after ENet's word that it could not:
+// the bind is tried again on a socket of this function's own, and the
+// system's reason read straight after it. Windows refuses a port it keeps
+// for itself: Hyper-V, WSL and Docker reserve blocks of ports from 49152 up
+// ("netsh interface ipv4 show excludedportrange protocol=udp"), different on
+// every PC and after a restart. That is what closed a player's console on
+// 64001 (16 Oct 2026). Linux and macOS keep the ports below 1024 for root.
+// _WIN32, not __WINDOWS__: ENet picks Winsock by it, so a MinGW build (no
+// __WINDOWS__) has its reason in WSAGetLastError too.
+static void PrintPortTrouble(int port)
+{
+	ENetAddress address;
+	ENetSocket probe;
+	int bound = 0, error = 0;
+
+	address.host = ENET_HOST_ANY;
+	address.port = (enet_uint16)port;
+
+	probe = enet_socket_create(ENET_SOCKET_TYPE_DATAGRAM);
+	if (probe == ENET_SOCKET_NULL)
+	{
+		fprintf(stderr, "No UDP socket could be made on this computer.\n");
+		return;
+	}
+
+	if (enet_socket_bind(probe, &address) == 0)
+		bound = 1;
+	else
+	{
+#ifdef _WIN32
+		error = WSAGetLastError();
+#else
+		error = errno;
+#endif
+	}
+	enet_socket_destroy(probe);
+
+	if (bound)
+	{
+		fprintf(stderr, "Port %d is free now. Try it again.\n", port);
+		return;
+	}
+
+#ifdef _WIN32
+	if (error == WSAEACCES)
+	{
+		fprintf(stderr, "Port %d is reserved: Windows keeps blocks of ports from\n"
+		                "49152 up for Hyper-V, WSL and Docker, or another program has\n"
+		                "it. Try one from 1024 to 49151.\n", port);
+		return;
+	}
+	if (error == WSAEADDRINUSE)
+	{
+		fprintf(stderr, "Port %d is in use by another program (a second server?).\n"
+		                "Try another one.\n", port);
+		return;
+	}
+	fprintf(stderr, "Port %d could not be opened (Windows socket error %d).\n", port, error);
+#else
+	if (error == EACCES && port < 1024)
+	{
+		fprintf(stderr, "Port %d needs root, as every port below 1024 does.\n"
+		                "Try one from 1024 up.\n", port);
+		return;
+	}
+	if (error == EADDRINUSE)
+	{
+		fprintf(stderr, "Port %d is in use by another program (a second server?).\n"
+		                "Try another one.\n", port);
+		return;
+	}
+	fprintf(stderr, "Port %d could not be opened (%s).\n", port, strerror(error));
+#endif
+}
+
 void ServerState_FirstBoot(int argc, char** argv)
 {
 	PrintServerBanner();
@@ -2996,7 +3125,7 @@ void ServerState_FirstBoot(int argc, char** argv)
 	MoveWindow(console, r.left, r.top, 580, 240 + 35 + 80, TRUE);
 #endif
 
-	int port;
+	int port = 0;   // from -p, or AskPort before it is used
 	int boolIsPortArgument = 0;
 	char* banlistPath = "";
 	int boolIsBanlistArgument = 0;
@@ -3166,40 +3295,35 @@ void ServerState_FirstBoot(int argc, char** argv)
 	}
 	atexit(enet_deinitialize);
 
-	if (!boolIsPortArgument)
+	// The port, given with -p or asked for. One that cannot be opened is
+	// asked for again, with the reason (PrintPortTrouble), rather than the
+	// server ending - and with it the console a double-click opened, before
+	// its last line could be read. Given with -p, it still ends the server,
+	// for the script or container that started it to see.
+	for (;;)
 	{
-	enter_port:
-		printf("Enter Port (0 - 65535): ");
-		int result = scanf("%d", &port);
-
-		if (result == 1) printf("Okay, using port %d UDP\n", port);
-		else if (result == 0)
+		if (!boolIsPortArgument)
 		{
-			printf("Error: Input format mismatch (please enter a valid integer)\n");
-			goto enter_port;
-		}
-		else
-		{
-			printf("Error: Failed to read the input or end of input reached\n");
-			goto enter_port;
+			port = AskPort();
+			printf("Okay, using port %d UDP\n\n", port);
 		}
 
-		printf("\n");
-	}
+		ENetAddress address;
+		address.host = ENET_HOST_ANY;
+		address.port = port;
+		server = enet_host_create(&address,
+			16 * MAX_CLIENTS + 128	/* every seat in the 16 rooms, plus 128 on the room list */,
+			2	/* allow up to 2 channels to be used, 0 and 1 */,
+			0	/* assume any amount of incoming bandwidth */,
+			0	/* assume any amount of outgoing bandwidth */);
+		if (server)
+			break;
 
-	ENetAddress address;
-	address.host = ENET_HOST_ANY;
-	address.port = port;
-	server = enet_host_create(&address,
-		16 * MAX_CLIENTS + 128	/* every seat in the 16 rooms, plus 128 on the room list */,
-		2	/* allow up to 2 channels to be used, 0 and 1 */,
-		0	/* assume any amount of incoming bandwidth */,
-		0	/* assume any amount of outgoing bandwidth */);
-
-	if (!server)
-	{
 		fprintf(stderr, "Error: Failed to create an ENet server host!\n");
-		exit(EXIT_FAILURE);
+		PrintPortTrouble(port);
+		if (boolIsPortArgument)
+			exit(EXIT_FAILURE);
+		fprintf(stderr, "\n");
 	}
 
 	// Quick Play's status query, answered ahead of ENet
@@ -3552,6 +3676,54 @@ void ServerState_Tick()
 	}
 }
 
+// SIGTERM (docker stop, compose down, systemd) or SIGINT (Ctrl+C): the main
+// loop ends and ServerState_Stop closes up. Without a handler the server
+// never stopped on SIGTERM in a container - it is the container's first
+// process, which ignores any signal it does not handle - so every docker
+// stop, compose down and autodeploy waited out Docker's 10 s and then killed
+// it, and the players found out only when their connection timed out.
+// Windows: nothing sets it (closing the console ends the process, as before).
+// _WIN32 as well as __WINDOWS__: only Server.vcxproj defines __WINDOWS__, and
+// a MinGW build through CMakeLists.txt has no sigaction.
+static volatile sig_atomic_t g_stopSignal = 0;
+
+#if !defined(__WINDOWS__) && !defined(_WIN32)
+static void OnStopSignal(int sig)
+{
+	g_stopSignal = sig;
+}
+#endif
+
+// Every player told at once - the plain disconnect, as for a full server - so
+// their game goes back to the room list now rather than waiting out its
+// timeout. Then out with _exit, not exit or a return from main: the
+// heartbeat's thread may be in the middle of a post, and exit's handlers
+// (libcurl's TLS library cleans up at exit) would pull its state out from
+// under it. stdout is the only thing left to flush.
+static void ServerState_Stop(int sig)
+{
+	int told = 0;
+	size_t i;
+
+	for (i = 0; i < server->peerCount; i++)
+	{
+		ENetPeer* peer = &server->peers[i];
+		if (peer->state == ENET_PEER_STATE_DISCONNECTED)
+			continue;
+
+		enet_peer_disconnect_now(peer, 0);
+		told++;
+	}
+	enet_host_destroy(server);
+
+	PrintPrefix(-1);
+	printf("Stopping (%s): %d %s disconnected\n",
+		(sig == SIGINT) ? "SIGINT" : "SIGTERM", told, (told == 1) ? "player" : "players");
+
+	fflush(stdout);
+	_exit(0);
+}
+
 int main(int argc, char** argv)
 {
 #ifndef __WINDOWS__
@@ -3596,7 +3768,23 @@ int main(int argc, char** argv)
 
 	ServerState_FirstBoot(argc, argv);
 
-	while (1)
+#if !defined(__WINDOWS__) && !defined(_WIN32)
+	// After the start-up rather than before it: a Ctrl+C at the port prompt
+	// still ends the server at once, as it always did, instead of leaving
+	// the prompt to fail over and over. SA_RESETHAND: a second Ctrl+C, should the
+	// stop itself ever hang, kills it the old way.
+	{
+		struct sigaction sa;
+		memset(&sa, 0, sizeof(sa));
+		sa.sa_handler = OnStopSignal;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = SA_RESETHAND;
+		sigaction(SIGTERM, &sa, NULL);
+		sigaction(SIGINT, &sa, NULL);
+	}
+#endif
+
+	while (!g_stopSignal)
 	{
 		#ifdef __WINDOWS__
 		void usleep(__int64 usec);
@@ -3608,4 +3796,7 @@ int main(int argc, char** argv)
 		Backfill_Tick();
 #endif
 	}
+
+	ServerState_Stop((int)g_stopSignal);
+	return 0;
 }
