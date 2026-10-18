@@ -25,11 +25,11 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1105
-#define SERVER_VERSION 1105
+#define VERSION 1107
+#define SERVER_VERSION 1107
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
-// defined before it includes this header; 1105). One from another release
+// defined before it includes this header; 1107). One from another release
 // than this header must not build: it would relay messages of a size and
 // meaning this header no longer gives them (an 1103 relay of 1104's kart
 // message sends no lap word, and every kart's place goes wrong).
@@ -50,8 +50,10 @@
 // server on the claimants' pings (WeaponHold_*, SV_main.c). 7 (1103): a
 // kart's hurt numbered (NET_EV_KART_HURT's count: NET_HURT_SEQ) and carried
 // in its kart message too (CG/SG_EverythingKart.hurt), so the others' copy
-// of it is hurt with that message's position.
-#define NET_WEAPON_EVENTS 7
+// of it is hurt with that message's position. 8 (1107): a masked kart's
+// bump claimed by its own machine (NET_EV_KART_CLAIM), which the server
+// sends to the kart it bumped alone, with both players' round trips.
+#define NET_WEAPON_EVENTS 8
 
 // The game modes of room rows 2-5 (POTION GAME, BOMBARDMENT, ELIMINATION,
 // TAG YOU'RE IT): the server referees every knockout from the karts' own
@@ -197,15 +199,23 @@
 #define ROOM_OPEN_INDEX(rn) ((rn) < ROOM_PAGES_OPEN * ROOM_PAGE_ROWS)
 // a room list row's text, "TAG YOU'RE IT - 12/12", with its 0 and the space
 // menu.c writes after the count and cuts off beside two digits; and a
-// region list row's, "SINGAPORE - 999 ON 999MS" and its 0 (ServerList_Rows,
+// region list row's, "AUSTRALIA  999MS  999 ONLINE" and its 0 (ServerList_Rows,
 // home.c), which share the buffer (roomRows, in Mods4.c)
-#define ROOM_LABEL_SIZE 26
+#define ROOM_LABEL_SIZE 29
 
 // The server and room lists' column: the boxes' centre and the lines under
 // them. The room list's box, the widest (20-character rows), has its frame
 // at x 292-492 here and its shadow to 495; the logo is centred left of it
 // (menu.c, logo.c).
 #define ONLINE_LIST_X 0x188
+
+// The region list's place (Matt, 1105): its box in the middle of the
+// screen, under the logo, which moves to the top in the middle at half its
+// size as the list opens (logoDraw.c) while the box slides up from the
+// bottom (ServerList_Box, home.c); PLAYERS ONLINE under the box
+// (lobbyBusy.c). Its rows are too wide for the column right of the logo.
+#define REGION_LIST_X 0x100
+#define REGION_LIST_Y 0x74
 
 // Every online screen's button hints - SELECT, BACK, PRIVATE, ABOUT, CANCEL
 // - centred on the screen, on one row (y 0xc6), so they stay put from
@@ -216,9 +226,9 @@
 // The in-race rank list's columns (rankRow.c), at the row's x at rest (10,
 // UI_43_DrawRankedDrivers; the icon RANK_ROW_ICON_DX left of it): the place
 // at RANK_PLACE_X1, one digit at the icon's top right, or RANK_PLACE_X2, two
-// (01-12, from a tenth kart); the name left-aligned RANK_NAME_GAP after the
+// (01-12, from a ninth kart); the name left-aligned RANK_NAME_GAP after the
 // place's last digit, five letters at most, so every name has the same gap
-// whatever its length; on one-line rows (11-12 karts) the lap split,
+// whatever its length; on one-line rows (9-12 karts) the lap split,
 // "m:ss.cc", RANK_SPLIT_GAP after a fifth letter, ending at RANK_SPLIT_RIGHT,
 // which the lobby countdown beside the second row keeps clear of (hooks.c).
 // RANK_SMALL_W and RANK_SMALL_P: the small font's letter and its ':' and '.'
@@ -325,7 +335,9 @@ enum ClientState
 #define NET_EV_OUT        11  // server -> clients only: a player placed - clientID the player (0xF none: a round's end alone, with ROUND_LAST; or, no cause and not last, the "round off" marker: under 2 players at the green, a plain race), owner the attacker (0xF none), serial ROUND_CAUSE_* | ROUND_LAST, arg the place (0xF none)
 #define NET_EV_IT         12  // server -> clients only (TAG): clientID who is it (0xF none), owner the tagger (0xF none), serial bit 0 the clock running, arg its seconds left
 #define NET_EV_LIVES      13  // server -> clients only (BOMBARDMENT): clientID lost a life and is still in, owner the attacker (0xF none), arg the lives left (1 to BOMB_LIVES - 1); the last life's loss is NET_EV_OUT
-#define NET_EV_COUNT      14
+#define NET_EV_KART_CLAIM 14  // 1107: the sender's masked kart bumped another player's on the sender's screen; no weapon, the identity's shooter field is the bumped kart's client ID and its count the hit VehPhysCrash_Attack gave it there (NET_CLAIM_HIT: the mask's, type 2 reason 6; with the masked kart's own shield up, 2 and 0; a turbo's squish, 3 and 5). The server sends it to that player alone, arg the two players' round trips added, in 4 ms (ROM -> server: 0); that kart's machine judges it (NetKart_ClaimApply, netWeapons.c) and hurts its kart as the game would, which goes out as its NET_EV_KART_HURT
+#define NET_EV_COUNT      15
+#define NET_CLAIM_HIT(type, reason) ((type) | ((reason) << 3))   // NET_EV_KART_CLAIM's count
 // the kinds only the server sends: refused from a client
 #define NET_EV_SERVER_MASK ((1 << NET_EV_OUT) | (1 << NET_EV_IT) | (1 << NET_EV_LIVES))
 // For the server: the kinds that end an identity (the first one relayed,
@@ -725,7 +737,7 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define PING_NA_STEPS   (PING_NA_SECONDS * 30)
 #define PING_NA         (-2)
 
-// ...and UPDATE REQ. in red, in place of the players and the round trip, on
+// ...and UPDATE REQUIRED in red, in place of the players and the round trip, on
 // the server list, for a server whose answer to the status query names
 // another SERVER_VERSION than this client's (Matt, 1105): the two cannot
 // play together until one of them updates (octr->serverPing, from the
