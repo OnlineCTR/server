@@ -25,11 +25,11 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1107
-#define SERVER_VERSION 1107
+#define VERSION 1109
+#define SERVER_VERSION 1109
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
-// defined before it includes this header; 1107). One from another release
+// defined before it includes this header; 1109). One from another release
 // than this header must not build: it would relay messages of a size and
 // meaning this header no longer gives them (an 1103 relay of 1104's kart
 // message sends no lap word, and every kart's place goes wrong).
@@ -52,8 +52,12 @@
 // in its kart message too (CG/SG_EverythingKart.hurt), so the others' copy
 // of it is hurt with that message's position. 8 (1107): a masked kart's
 // bump claimed by its own machine (NET_EV_KART_CLAIM), which the server
-// sends to the kart it bumped alone, with both players' round trips.
-#define NET_WEAPON_EVENTS 8
+// sends to the kart it bumped alone, with both players' round trips. 9
+// (1109): a shield's bump claimed the same way, mask or not (the server
+// takes one a shield fired), and a shield's bump told as its own hurt
+// reason (NET_HURT_SHIELD_BUMP), for every machine to pop the bumper's
+// shield too.
+#define NET_WEAPON_EVENTS 9
 
 // The game modes of room rows 2-5 (POTION GAME, BOMBARDMENT, ELIMINATION,
 // TAG YOU'RE IT): the server referees every knockout from the karts' own
@@ -125,6 +129,19 @@
 #define KNOCK_SAMPLE_ADDR  0x807FE000
 #define KNOCK_SAMPLE_BYTES 7104
 #define BI_KNOCK_SAMPLE    236
+
+// The 60 FPS disc's kart rows in its interpolation tables (struct
+// InterpTables, interp.h, which asserts these), one a kart slot. From
+// Interp_BeforeRender to Interp_AfterInstances - the 3D pass of the first
+// draw after a logic step - every kart's posCurr is halfway back to the step
+// before, its true one kept in drvSave and put back after the pass. The client
+// reads its own kart's row, to send the true position (Kart_OwnPos,
+// CL_main.cpp), and writes another kart's drvSave with its posCurr, so the
+// put-back keeps the kart message's (1109). Never written by the 30 FPS disc.
+#define INTERP_DRV_PREV(slot)  (0x807FD400u + 12u * (unsigned int)(slot))   // Vec3: the step before's
+#define INTERP_DRV_SAVE(slot)  (0x807FD490u + 12u * (unsigned int)(slot))   // Vec3: this step's, while the half step is drawn
+#define INTERP_DRV_PTR(slot)   (0x807FD520u + 4u * (unsigned int)(slot))    // the Driver the row was last kept for
+#define INTERP_DRV_STAMP(slot) (0x807FD550u + 4u * (unsigned int)(slot))    // gGT->timer then
 //#define ONLINE_BETA_MODE
 
 // Post-race countdown drawn under RACE COMPLETE (seconds until the server
@@ -328,14 +345,14 @@ enum ClientState
 #define NET_EV_MINE_SPENT 4   // the sender's kart drove into a TNT its shield, mask or invincibility stopped: the TNT just goes off
 #define NET_EV_HEAD_BOOM  5   // the TNT on the sender's head went off; arg 0 its time ran out (the kart blasted), 1 the kart crashed or spun, 2 the kart was already blasted
 #define NET_EV_HEAD_OFF   6   // the sender hopped the TNT off its head
-#define NET_EV_PROJ_END   7   // a projectile ended; arg 0 it hit the sender's kart (on the sender's machine), 1 it went off against anything else on its shooter's machine (a wall, a mine, a bomb set off), 2 it went quietly (a missile an explosion took out on its shooter's machine: RB_Hazard_ThCollide_Missile; a shield its shooter's machine had no room to throw)
-#define NET_EV_KART_HURT  8   // the sender's kart was hurt, by anything (VehPickState_NewState): no weapon, the identity's shooter field is the attacker's client ID and its count bit 0 set with an attacker, bits 1-4 the hurt's number (NET_HURT_SEQ, 1103: each kart's hurts counted, 1-15 round again, as its kart message's hurt says them too); arg bits 0-2 the damage type, 3-5 the reason, bit 6 a shield stopped it (and popped)
+#define NET_EV_PROJ_END   7   // a projectile ended; arg 0 it hit the sender's kart (on the sender's machine), 1 it went off against anything else on its shooter's machine (a wall, a mine, a bomb set off), 2 it went quietly (a missile an explosion took out on its shooter's machine: RB_Hazard_ThCollide_Missile; a shield its shooter's machine had no room to throw), 3 (1109) a held shield bumped off on its shooter's machine (VehPhysCrash_Attack), whoever the bump hurt: the others pop their copy's
+#define NET_EV_KART_HURT  8   // the sender's kart was hurt, by anything (VehPickState_NewState): no weapon, the identity's shooter field is the attacker's client ID and its count bit 0 set with an attacker, bits 1-4 the hurt's number (NET_HURT_SEQ, 1103: each kart's hurts counted, 1-15 round again, as its kart message's hurt says them too); arg bits 0-2 the damage type, 3-5 the reason (NET_HURT_SHIELD_BUMP: the attacker's shield's bump, 1109), bit 6 a shield stopped it (and popped)
 #define NET_EV_DOOR       9   // Tiger Temple's door opened on the sender's machine (by anything but this event): it opens everywhere; no weapon, identity 0
 #define NET_EV_LAP        10  // ELIMINATION, ROM -> server only: the sender's kart reached lap arg (drivers[0]->lapIndex just raised); identity 0; the server takes it and relays nothing
 #define NET_EV_OUT        11  // server -> clients only: a player placed - clientID the player (0xF none: a round's end alone, with ROUND_LAST; or, no cause and not last, the "round off" marker: under 2 players at the green, a plain race), owner the attacker (0xF none), serial ROUND_CAUSE_* | ROUND_LAST, arg the place (0xF none)
 #define NET_EV_IT         12  // server -> clients only (TAG): clientID who is it (0xF none), owner the tagger (0xF none), serial bit 0 the clock running, arg its seconds left
 #define NET_EV_LIVES      13  // server -> clients only (BOMBARDMENT): clientID lost a life and is still in, owner the attacker (0xF none), arg the lives left (1 to BOMB_LIVES - 1); the last life's loss is NET_EV_OUT
-#define NET_EV_KART_CLAIM 14  // 1107: the sender's masked kart bumped another player's on the sender's screen; no weapon, the identity's shooter field is the bumped kart's client ID and its count the hit VehPhysCrash_Attack gave it there (NET_CLAIM_HIT: the mask's, type 2 reason 6; with the masked kart's own shield up, 2 and 0; a turbo's squish, 3 and 5). The server sends it to that player alone, arg the two players' round trips added, in 4 ms (ROM -> server: 0); that kart's machine judges it (NetKart_ClaimApply, netWeapons.c) and hurts its kart as the game would, which goes out as its NET_EV_KART_HURT
+#define NET_EV_KART_CLAIM 14  // 1107: the sender's masked kart bumped another player's on the sender's screen - or, 1109, its shield did, mask or not; no weapon, the identity's shooter field is the bumped kart's client ID and its count the hit VehPhysCrash_Attack gave it there (NET_CLAIM_HIT: the mask's, type 2 reason 6; the sender's own shield bumped off on it, 2 and 0; a masked kart's turbo squish, 3 and 5). The server sends it to that player alone, arg the two players' round trips added, in 4 ms (ROM -> server: 0); that kart's machine judges it (NetKart_ClaimApply, netWeapons.c) and hurts its kart as the game would, which goes out as its NET_EV_KART_HURT
 #define NET_EV_COUNT      15
 #define NET_CLAIM_HIT(type, reason) ((type) | ((reason) << 3))   // NET_EV_KART_CLAIM's count
 // the kinds only the server sends: refused from a client
@@ -351,6 +368,24 @@ enum ClientState
 #define NET_EV_NOID_MASK    ((1 << NET_EV_KART_HURT) | (1 << NET_EV_DOOR))
 #define NET_EV_ANYROOM_MASK (NET_EV_NOID_MASK | (1 << NET_EV_PROJ_END))
 #define NET_KART_BLOCKED  0x40   // NET_EV_KART_HURT's arg: a shield stopped it
+// NET_EV_KART_HURT's damage type for a hit a mask or invincibility stopped
+// (1109), always with NET_KART_BLOCKED: nothing happens to the kart, its
+// machine laughed (VehPickState_NewState) and the others laugh with it. 6, a
+// type the game never gives (it knows 0-5); never a hurt to a game mode's
+// referee (SV_main.c, Round_OnHurt: blocked).
+#define NET_KART_DODGED   6
+// ...and 7 (1109), always with NET_KART_BLOCKED and NET_HURT_SHIELD_BUMP: a
+// shield's bump on a kart it did nothing to (blasted or tumbling already),
+// told for the bumper's shield alone - every machine pops it; no voice, no hurt
+#define NET_KART_BUMPED   7
+// NET_EV_KART_HURT's reason for a kart bumped by another's shield (1109):
+// the game's own is 0 (VehPhysCrash_Attack), which a TNT going off on a head
+// gives too; 7, a reason the game never gives (VehPickState_NewState knows
+// 1-6), says the bumper's shield went in the bump - every machine pops it
+// (NetKart_Replay; the bumper's own too, when only the bumped kart's screen
+// saw the bump) and hurts the kart with reason 0. In the kart message's
+// hurt word too (its 3 reason bits).
+#define NET_HURT_SHIELD_BUMP 7
 // one event in an int: bits 0-11 the identity (count, then the shooter's
 // client ID at 8-11), 12-16 the kind, 17-24 its argument, and on the way in
 // 25-28 the sender's client ID

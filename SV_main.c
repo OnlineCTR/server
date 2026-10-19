@@ -35,19 +35,20 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1107
+#define SV_PROTOCOL 1109
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
 // copy - an earlier release's global.h left next to the sources - would fail
 // a page further down with undeclared message types and incomplete structs;
 // this says what actually went wrong. NET_WEAPON_EVENTS is the newest
-// thing this file needs from the header (8: a masked kart's bump claimed,
+// thing this file needs from the header (9: a shield's bump claimed too,
+// NET_CLAIM_HIT, 1109; 8: a masked kart's bump claimed,
 // NET_EV_KART_CLAIM, 1107; 5: the game modes' events,
 // NET_EV_LAP / NET_EV_OUT / NET_EV_IT, and SG_STARTLOADING's round code;
 // 4: 4-bit IDs, 12-bit identity, the rooms' closed mask; 3: the weapons'
 // arbitration, Tiger Temple's door, the item-less rooms' ghost bombs).
-#if !defined(NET_WEAPON_EVENTS) || (NET_WEAPON_EVENTS < 8)
+#if !defined(NET_WEAPON_EVENTS) || (NET_WEAPON_EVENTS < 9)
 #error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 // The game modes' rounds (Round_*: the ROUND_* causes and codes, TAG_*,
@@ -140,10 +141,17 @@ typedef struct {
 
 	// A masked kart's bump claims (KartClaim_Relay): when this player last
 	// fired a mask (CG_WEAPON), and last claimed a bump on each other player
-	// (enet_time_get() | 1; 0 never). Cleared as each race loads; a join's
-	// memset clears them too. Server-only.
+	// (enet_time_get() | 1; 0 never). A shield's (1109): one claim for the
+	// shield this player fired last (its count, shieldSerial: the same count
+	// again is that shield let go - thrown, it bumps nobody), spent by the
+	// claim - a shield's bump is its pop. Cleared as each race loads
+	// (shieldSerial to SHIELD_SERIAL_NONE, which no count is); a join's
+	// memset clears them too, and a race loads before a joiner fires.
+	// Server-only.
 	enet_uint32 maskShotAt;
 	enet_uint32 claimAt[MAX_CLIENTS];
+	unsigned char shieldClaim;
+	unsigned short shieldSerial;
 } PeerInfo;
 
 typedef struct
@@ -2090,15 +2098,19 @@ static int WeaponHold_Claim(RoomInfo* ri, ENetPeer* peer, int peerID, struct CG_
 	return 1;
 }
 
-// A masked kart's bump as its own machine saw it (NET_EV_KART_CLAIM, 1107):
-// to the bumped kart's machine alone, which judges it (netWeapons.c) and,
-// when it takes, sends its kart's hurt as ever (NET_EV_KART_HURT, to the
-// room and the referee). The two players' round trips go with it, which
-// only the server knows: that machine rewinds its kart's path by them to
-// where the claimant's screen had it. In item rooms, between two players
-// still in a round, from a player who fired a mask lately (MASK_SHOT_MS:
-// CG_WEAPON), at most once a KART_CLAIM_GAP_MS for each pair.
+// A masked kart's bump as its own machine saw it (NET_EV_KART_CLAIM, 1107)
+// - or a shield's, mask or not (1109: the claim's hit, its serial, the
+// shield's NET_CLAIM_HIT(2, 0)): to the bumped kart's machine alone, which
+// judges it (netWeapons.c) and, when it takes, sends its kart's hurt as ever
+// (NET_EV_KART_HURT, to the room and the referee). The two players' round
+// trips go with it, which only the server knows: that machine rewinds its
+// kart's path by them to where the claimant's screen had it. In item rooms,
+// between two players still in a round, from a player who fired a mask
+// lately (MASK_SHOT_MS: CG_WEAPON) or - a shield's bump - a shield not yet
+// claimed with (shieldClaim: one claim a shield, its pop), at most once a
+// KART_CLAIM_GAP_MS for each pair.
 #define KART_CLAIM_GAP_MS 400     // the ROM's own gap is 500 ms (CLAIM_GAP_MS)
+#define SHIELD_SERIAL_NONE 0x100  // no shield fired this race: no shot count (8 bits) is it
 #define MASK_SHOT_MS      20000   // a mask's longest, 12 s of game time (0x2d00, 960 a second) and its fade, with room for a game running slow: only a gate against abuse, the bumped kart's machine checks the mask itself
 static void KartClaim_Relay(RoomInfo* ri, ENetPeer* peer, int peerID, const struct CG_MessageWeaponEvent* r)
 {
@@ -2116,9 +2128,12 @@ static void KartClaim_Relay(RoomInfo* ri, ENetPeer* peer, int peerID, const stru
 	ENetPeer* vp = ri->peerInfos[victim].peer;
 	if (vp == 0) return;
 	if (ri->roundLive && (!Round_IsIn(ri, peerID) || !Round_IsIn(ri, victim))) return;
-	if (pa->maskShotAt == 0 || (int)(now - pa->maskShotAt) > MASK_SHOT_MS) return;
+	int maskOn = pa->maskShotAt != 0 && (int)(now - pa->maskShotAt) <= MASK_SHOT_MS;
+	int shieldBump = r->serial == NET_CLAIM_HIT(2, 0);
+	if (!maskOn && !(shieldBump && pa->shieldClaim)) return;
 	if (pa->claimAt[victim] != 0 && (int)(now - pa->claimAt[victim]) < KART_CLAIM_GAP_MS) return;
 	pa->claimAt[victim] = now | 1;
+	if (shieldBump) pa->shieldClaim = 0;
 
 	unsigned int rtt = (peer->roundTripTime + vp->roundTripTime) / 4;
 	memset(&s, 0, sizeof(s));
@@ -2718,8 +2733,15 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// what it places is live
 			ri->weaponFate[(peerID << 8) | r->serial] = WEAPON_LIVE;
 
-			// a mask (item 7): its bumps may be claimed (KartClaim_Relay)
+			// a mask (item 7): its bumps may be claimed (KartClaim_Relay); a
+			// shield (item 6), new (not one let go: the same count), one bump
 			if (r->weapon == 7) ri->peerInfos[peerID].maskShotAt = enet_time_get() | 1;
+			if (r->weapon == 6)
+			{
+				PeerInfo* pw = &ri->peerInfos[peerID];
+				pw->shieldClaim = (r->serial != pw->shieldSerial);   // the same count again: let go
+				pw->shieldSerial = r->serial;
+			}
 
 			s->type = SG_WEAPON;
 			s->clientID = peerID;
@@ -2789,7 +2811,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				break;
 			}
 
-			// a masked kart's bump: to the bumped kart's machine alone
+			// a masked kart's or a shield's bump: to the bumped kart's machine alone
 			if (kind == NET_EV_KART_CLAIM)
 			{
 				KartClaim_Relay(ri, peer, peerID, r);
@@ -3614,6 +3636,8 @@ void ServerState_Tick()
 				for (int k = 0; k < MAX_CLIENTS; k++)
 				{
 					ri->peerInfos[k].maskShotAt = 0;
+					ri->peerInfos[k].shieldClaim = 0;
+					ri->peerInfos[k].shieldSerial = SHIELD_SERIAL_NONE;
 					memset(ri->peerInfos[k].claimAt, 0, sizeof(ri->peerInfos[k].claimAt));
 				}
 
