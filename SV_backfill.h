@@ -65,12 +65,13 @@
 //     (SG_NEWCLIENT's NEWCLIENT_SPECTATOR), send their name, "load" the race
 //     the answer gives them (CG_STARTRACE a few seconds after its
 //     SG_STARTLOADING) and watch from the catch-up's SG_STARTRACE, reporting
-//     nothing; the room's reset welcomes them as players (special 0), and
-//     from there they are ordinary bots. --botspecname S holds a spectator's
-//     CG_NAME S seconds (a race over between a join and its name),
-//     --botspecload S its CG_STARTRACE (a room reset during its load). So the
-//     server's side of a spectator - the seat, the hold, the catch-up, the
-//     racers' WATCHERS, the welcome - can be tried from one DuckStation.
+//     CG_WATCH{N} with --botwatch (below) and nothing else; the room's reset
+//     welcomes them as players (special 0), and from there they are
+//     ordinary bots. --botspecname S holds a spectator's CG_NAME S seconds (a
+//     race over between a join and its name), --botspecload S its
+//     CG_STARTRACE (a room reset during its load). So the server's side of a
+//     spectator - the seat, the hold, the catch-up, the WATCHERS of the racer
+//     it watches, the welcome - can be tried from one DuckStation.
 //   - with --botfinish N (1110): in a plain race, the first N racing bots
 //     cross the line one after another, BOT1 --botfinishat S seconds after
 //     the green (25 by default), each next 1.5 s later - their CG_ENDRACE as
@@ -78,9 +79,23 @@
 //     player can finish 9th or later behind them (the bot driver's ranks past
 //     vanilla's 8).
 //   - with --botleave S (1110): a bot that has finished (--botfinish) or a
-//     spectator bot watching leaves S seconds on - the racers' WATCHERS goes
-//     down by one, a finished bot's kart is braked by its watchdog, and a
-//     spectator joining after that gets its finish with no ENDRACE_BOT.
+//     spectator bot watching leaves S seconds on - the racer it watched
+//     (--botwatch) told one fewer, a finished bot's kart braked by its
+//     watchdog, and a spectator joining after that gets its finish with no
+//     ENDRACE_BOT.
+//   - with --botwatch N (1111): a spectator bot, from its catch-up - or,
+//     with --botspecload, from its SG_STARTLOADING, while it is still held -
+//     and a --botfinish bot, right after its CG_ENDRACE, report their camera
+//     on seat N (CG_WATCH{N}, once a race), as a client does when its camera
+//     settles on that kart (Watch_Service, CL_main.cpp); 15 is nobody
+//     (WATCH_NOBODY). So a racer's WATCHERS, the count of those whose camera
+//     is on it, can be tried from one DuckStation: N the player's seat, or
+//     another bot's to see that the player is told nothing.
+//   - with --botload S (1111): the racing bots send their CG_STARTRACE S
+//     seconds after SG_STARTLOADING, not 3-5 s on (at most the server's
+//     load wait less 5 s, --loadsecs), so the room sits at the start line -
+//     in a race, not watchable yet (racingMask without spectateMask) - for a
+//     probe of RACE IN PROGRESS's greyed JOIN ROOM.
 //   - removed (a kick, an idle clock), or gone with --botleave: back on the
 //     room list, connected again a few seconds later. (A kick keeps
 //     127.0.0.1 - every bot - out of that room for the kick ban's time.)
@@ -141,13 +156,15 @@ typedef struct
 	// it as a player; watching: its catch-up came (the private
 	// SG_STARTRACE). nameAt: its CG_NAME due (--botspecname); finishAt: its
 	// CG_ENDRACE due in a plain race (--botfinish); leaveAt: when it leaves
-	// (--botleave). 0 none due.
+	// (--botleave). 0 none due. watchSent: its CG_WATCH went this race
+	// (--botwatch, 1111; once a race, cleared with the race).
 	int spectator;
 	int spectating;
 	int watching;
 	enet_uint32 nameAt;
 	enet_uint32 finishAt;
 	enet_uint32 leaveAt;
+	int watchSent;
 } Bot;
 
 static Bot bots[BACKFILL_MAX];
@@ -161,6 +178,8 @@ static int botFinish = 0;         // --botfinish: in a plain race, the first N r
 static int botFinishAtSecs = 25;  // --botfinishat: the first of them that long after the green
 static int botFinishBot = 0;      // --botfinishbot: their CG_ENDRACE with ENDRACE_BOT
 static int botLeaveSecs = 0;      // --botleave: seconds after its finish or its catch-up a bot leaves; 0 never
+static int botWatch = -1;         // --botwatch: the seat spectator and finished bots report their camera on (CG_WATCH, 1111); -1 none sent
+static int botLoadSecs = 0;       // --botload: seconds a racing bot "loads" (1111); 0 as ever, 3-5 s
 
 #define BOT_FINISH_GAP_MS 1500    // --botfinish: between one bot's finish and the next's
 
@@ -205,6 +224,7 @@ static void Bot_RaceReset(Bot* b)
 	b->lapsDone = b->lapMs = 0;
 	b->raceStart = b->hurtAt = b->lapAt = b->tagAt = 0;
 	b->finishAt = b->leaveAt = 0;
+	b->watchSent = 0;
 }
 
 static void Bot_RoundReset(Bot* b)
@@ -313,6 +333,27 @@ static void Bot_EndRace(Bot* b, int flags)
 	m.courseTime = (int)((long long)ms * 960 / 1000);
 	m.lapTime = b->lapsDone ? (int)((long long)b->lapMs * 960 / 1000) : 0;
 	Bot_Send(b, &m, sizeof(m));
+}
+
+// The kart its camera follows, as a client reports it once its camera has
+// settled on one (CG_WATCH, 1111: Watch_Service, CL_main.cpp): --botwatch's
+// seat, once a race (watchSent); nothing without --botwatch.
+static void Bot_SendWatch(Bot* b, int index)
+{
+	struct CG_MessageWatch m;
+
+	if (botWatch < 0 || b->watchSent)
+		return;
+	b->watchSent = 1;
+
+	memset(&m, 0, sizeof(m));
+	m.type = CG_WATCH;
+	m.target = (unsigned char)botWatch;
+	Bot_Send(b, &m, sizeof(m));
+
+	PrintPrefix(b->room >= 0 ? b->room + 1 : -1);
+	printf("BOT%d (%d) reports its camera on %d (--botwatch)%s\n", index + 1, b->clientID, botWatch,
+		b->spectating && !b->watching ? ", still held" : "");
 }
 
 // A lap time's wobble, +-0.4 s: less than the 0.7 s between two bots' lap
@@ -500,7 +541,11 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 			// race; for ELIMINATION the laps.
 			// A spectator's (1110: the answer to its CG_NAME) is the same,
 			// but it plays no round - it has no kart - and "loads" for
-			// --botspecload seconds if given.
+			// --botspecload seconds if given; a racing bot for --botload
+			// seconds (1111), holding the room at the start line.
+			// A spectator "loading" for --botspecload reports its camera
+			// now, while still held (--botwatch, 1111): the server stores it
+			// and counts it only from the catch-up.
 			int code = ((const struct SG_Header*)data)->padding;
 			Bot_RaceReset(b);
 			b->room = Bot_Room(b);
@@ -510,7 +555,12 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 				b->roundLaps = (code < ROUND_CODE_VOTED) ? code : 0;
 			}
 			if (b->spectating && botSpecLoadSecs > 0)
+			{
 				b->raceAt = Bot_Now() + (enet_uint32)botSpecLoadSecs * 1000;
+				Bot_SendWatch(b, index);
+			}
+			else if (!b->spectating && botLoadSecs > 0)
+				b->raceAt = Bot_Now() + (enet_uint32)botLoadSecs * 1000;
 			else
 				b->raceAt = Bot_In(3000, 5000);
 			break;
@@ -522,7 +572,8 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 			b->raceStart = Bot_Now();
 
 			// A spectator's (1110): its catch-up's last word - watching now,
-			// reporting nothing, and gone --botleave seconds on if given.
+			// its camera reported (--botwatch, 1111; already, held, with
+			// --botspecload), and gone --botleave seconds on if given.
 			if (b->spectating)
 			{
 				b->watching = 1;
@@ -530,6 +581,7 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 					b->leaveAt = b->raceStart + (enet_uint32)botLeaveSecs * 1000;
 				PrintPrefix(b->room >= 0 ? b->room + 1 : -1);
 				printf("BOT%d (%d) caught up and watching\n", index + 1, b->clientID);
+				Bot_SendWatch(b, index);
 				break;
 			}
 
@@ -856,8 +908,9 @@ static void Backfill_Tick(void)
 		}
 
 		// --botfinish (1110): across the line, as a client says it - with
-		// ENDRACE_BOT for --botfinishbot - and, with --botleave, gone a
-		// while on
+		// ENDRACE_BOT for --botfinishbot - its camera then on --botwatch's
+		// seat (1111: a client's CG_ENDRACE always goes ahead of its first
+		// CG_WATCH) and, with --botleave, gone a while on
 		if (b->finishAt && (int)(now - b->finishAt) >= 0)
 		{
 			b->finishAt = 0;
@@ -867,6 +920,7 @@ static void Backfill_Tick(void)
 				PrintPrefix(b->room >= 0 ? b->room + 1 : -1);
 				printf("BOT%d (%d) crosses the line (--botfinish)%s\n", i + 1, b->clientID,
 					botFinishBot ? ", its kart driven on by the bot (ENDRACE_BOT)" : "");
+				Bot_SendWatch(b, i);
 				if (botLeaveSecs > 0)
 					b->leaveAt = now + (enet_uint32)botLeaveSecs * 1000;
 			}
@@ -896,6 +950,9 @@ static void Backfill_Init(int port)
 	if (botCount > BACKFILL_MAX) botCount = BACKFILL_MAX;
 	if (botCount < 0) botCount = 0;
 	if (botSpectate > botCount) botSpectate = botCount;
+	// (--botload, 1111: inside the server's own wait on a load, --loadsecs,
+	// with 5 s to spare - the room holds at the start line, nobody removed)
+	if (botLoadSecs > loadSeconds - 5) botLoadSecs = (loadSeconds > 5) ? loadSeconds - 5 : 0;
 	botPort = port;
 
 	for (int i = 0; i < botCount; i++)
@@ -925,5 +982,15 @@ static void Backfill_Init(int port)
 		PrintPrefix(-1);
 		printf("DEBUG BUILD: in plain races BOT1-BOT%d cross the line from %ds after the green (--botfinish)%s\n",
 			botFinish, botFinishAtSecs, botFinishBot ? ", with ENDRACE_BOT" : "");
+	}
+	if (botWatch >= 0)
+	{
+		PrintPrefix(-1);
+		printf("DEBUG BUILD: spectator and finished bots report their camera on %d (--botwatch)\n", botWatch);
+	}
+	if (botLoadSecs > 0)
+	{
+		PrintPrefix(-1);
+		printf("DEBUG BUILD: racing bots load for %ds (--botload)\n", botLoadSecs);
 	}
 }

@@ -35,7 +35,7 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1110
+#define SV_PROTOCOL 1111
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
@@ -82,8 +82,11 @@
 // many watch (SG_MessageLobbyCountdown's kind, LOBBYCOUNT_WATCHERS), and a
 // finished player's kart driven on by the bot (ENDRACE_BOT,
 // SG_MessageEndRace.flags): 1110. An older header has none of these names,
-// and its SG_ROOMS is two bytes short.
-#if !defined(NET_SPECTATE) || (NET_SPECTATE < 1)
+// and its SG_ROOMS is two bytes short. 2, each racer told only of those
+// watching them (CG_WATCH, CG_MessageWatch, WATCH_NOBODY) and the room
+// list's racingMask (ROOM_RACING): 1111 - a 1110 header has neither, and
+// its SG_ROOMS is 16 bytes, not 18.
+#if !defined(NET_SPECTATE) || (NET_SPECTATE < 2)
 #error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 
@@ -197,6 +200,14 @@ typedef struct {
 	char loadSent;
 	enet_uint32 spectateAt;
 
+	// Watching (1111, Watch_*): the seat whose kart this one's camera
+	// follows, + 1 (0 nobody; CG_WATCH) - kept from a spectator's seat on
+	// (counted from its catch-up); watchersTold: the count this seat was
+	// last sent as a racer watched. 0 at each race's load and the reset; the
+	// join's memset clears both. Server-only.
+	unsigned char watching;
+	unsigned char watchersTold;
+
 	// This race as a spectator's catch-up retells it (1110,
 	// Spectator_CatchUp): the order this player's CG_ENDRACE came in (1 the
 	// first, 0 none yet), its ENDRACE_BOT, its course and best-lap times, and
@@ -247,6 +258,13 @@ typedef struct
 	// return, the last spare seat taken, all pushed the same way.
 	char boolSpectateOpen;
 
+	// ...and whether it said the room is in a race (1111, RoomInRace): its
+	// load and its reset - pushed even when the room was shown closed
+	// already (a pick clock's last seconds before the load), so the row
+	// offers RACE IN PROGRESS from the load on, not from the client's next
+	// refresh.
+	char boolRaceShown;
+
 	// The players' vote for the track, then the laps (Vote_*): the vote
 	// running (VOTE_*), whether the room votes at all - the host's PLAYER
 	// VOTING, off is set, so the room's memset leaves a new room voting -
@@ -284,6 +302,15 @@ typedef struct
 	// load's time is up: whoever has not loaded LOAD_TIMEOUT_SECONDS after it
 	// is removed (ServerState_Tick). Same wrap-safe arithmetic as endTime.
 	enet_uint32 loadStartAt;
+
+	// When the race's green light shows (1111, Matt: "JOIN ROOM greyed until
+	// the green"): SG_STARTRACE + the lights (TAG_LIGHTS_MS), | 1 so it is
+	// never 0; 0 before the race starts (cleared at SG_STARTLOADING and the
+	// reset). A race is watched from here on (RoomOpenForSpectate) - a plain
+	// race's as a round's, whose own green is roundGreenAt - where 1110 let a
+	// plain race be watched from its lights' start. Same wrap-safe arithmetic
+	// as endTime. Server-only.
+	enet_uint32 raceGreenAt;
 
 	// The race as a spectator joins it (1110, Spectator_*), server-only:
 	// raceSeats, the seats with a player as it loaded (SG_STARTLOADING) - no
@@ -362,6 +389,8 @@ RoomInfo roomInfos[16] = { NULL };
 static int RoomOpenForJoin(RoomInfo* ri);
 // (and whether its race can be watched: 1110, beside it)
 static int RoomOpenForSpectate(RoomInfo* ri);
+// (and whether it is in a race at all: 1111, beside that)
+static int RoomInRace(RoomInfo* ri);
 
 // ------------------------------------------------------------- kick bans
 //
@@ -391,6 +420,7 @@ static int loadSeconds = LOAD_TIMEOUT_SECONDS;   // --loadsecs: the wait on a lo
 static int tagFirst = -1;                        // --tagfirst: TAG's first "it" by client ID, for testing (-1 at random)
 static int kickVoteLog = 0;                      // --kicklog: every vote to kick in the log, voter and all - for testing only (KickVote_*)
 static int spectateEnabled = SPECTATE_ENABLED;   // --nospectate: 0, no race in progress can be watched (RoomOpenForSpectate)
+static int watchLog = 0;                         // --watchlog: every camera's report in the log, who watches whom - for testing only (Watch_Set, 1111)
 
 static void KickBan_Add(enet_uint32 ip, int room)
 {
@@ -576,15 +606,20 @@ void SendRoomData(ENetPeer* peer)
 // joined (RoomOpenForJoin), which the ROM shows as locked and, inside the
 // room, as ROOM CLOSED on the PLAYERS box (lobbyGrid.c). And in
 // spectateMask (1110) the rooms whose race can be watched now
-// (RoomOpenForSpectate), which the ROM offers as MATCH IN PROGRESS,
-// SPECTATE on a row it cannot join (hostOptions.c). Its spectators are
-// counted with its players: they hold a seat.
+// (RoomOpenForSpectate), which light RACE IN PROGRESS's JOIN ROOM on a row
+// the ROM cannot join (hostOptions.c); in racingMask (1111) the rooms in a
+// race at all (RoomInRace: its load, start line, lights, race and results),
+// which open that box - JOIN ROOM greyed until the race can be watched,
+// WAIT TO JOIN beside it (Matt, 1111). Its spectators are counted with its
+// players: they hold a seat.
 #define SETUP(x, index) \
 	x = roomCount[index]; \
 	if (!RoomOpenForJoin(&roomInfos[index])) \
 		mr.closedMask |= (unsigned short)(1u << (index)); \
 	if (RoomOpenForSpectate(&roomInfos[index])) \
-		mr.spectateMask |= (unsigned short)(1u << (index));
+		mr.spectateMask |= (unsigned short)(1u << (index)); \
+	if (RoomInRace(&roomInfos[index])) \
+		mr.racingMask |= (unsigned short)(1u << (index));
 
 	// Do NOT use roomInfos[index].clientCount,
 	// cause that doesnt account for empty holes
@@ -623,8 +658,11 @@ void SendRoomData(ENetPeer* peer)
 
 		// nor, there, a race to watch (1110): a spectator is one of the
 		// room's players from its reset on - and the join's check refuses
-		// it anyway (CG_JOINROOM)
+		// it anyway (CG_JOINROOM). Nor a race in it at all (1111): the row
+		// keeps 1110's Waiting to Join toggle, no RACE IN PROGRESS box
+		// offering a join that would be refused.
 		mr.spectateMask &= (unsigned short)~ban;
+		mr.racingMask &= (unsigned short)~ban;
 
 		for (int i = 0; i < 16; i++)
 			for (int j = 0; j < MAX_CLIENTS; j++)
@@ -778,33 +816,113 @@ static void SendHost(RoomInfo* ri)
 	broadcastToPeersReliable(ri, &sg, sizeof(struct SG_MessageHost));
 }
 
-// The spectators watching this race (caught up: spectator 2), to the room:
-// the racers' WATCHERS (1110, Matt: playerCount.c draws the count, from
-// octr->watchers, while it is 1 or more). SG_LOBBYCOUNTDOWN with its kind
-// LOBBYCOUNT_WATCHERS, the count in its seconds' place - reliable on
-// channel 0, as every room broadcast, so each count lands in order. Sent in
-// exactly two places: as a spectator is caught up (CG_STARTRACE), and as one
-// watching leaves (ProcessDisconnectEvent, its seat already emptied, so the
-// count leaves it out). A spectator still held is sent none (the hold), and
-// one watching gets the count too, which its HUD never shows. Nothing at the
-// room's reset: every client clears its count at the next load
-// (SG_STARTLOADING).
-static void Watchers_Send(RoomInfo* ri)
-{
-	struct SG_MessageLobbyCountdown sg;
-	int n = 0;
+// ------------------------------------------------- each racer's WATCHERS
+//
+// A racer's WATCHERS (playerCount.c draws octr->watchers while it is 1 or
+// more) counts the players whose camera is on that racer's kart (1111,
+// Matt) - in 1110 it was the room's spectators, one number for every racer.
+// Each client reports the kart its own camera follows as it settles
+// (CG_WATCH: Watch_Service, CL_main.cpp - a spectator's from its race's wait
+// on, a player's over the line or out of a round; a racer's camera is its
+// own kart, nobody), and the server keeps one target per seat (watching)
+// and tells each racer its own count, to it alone, as it changes
+// (SG_LOBBYCOUNTDOWN's LOBBYCOUNT_WATCHERS, the count in its seconds'
+// place; watchersTold the last sent). Reliable on channel 0, as the room's
+// messages, so each count lands in order and after the race's own start. A
+// count changes on a report (the target it left and the one it is on now),
+// a spectator's catch-up (CG_STARTRACE: its target, stored while it was
+// held, counted from here) and any leave (the target it watched; nobody
+// watches a leaver any more). Nothing at the load or the reset: both sides
+// clear (SG_STARTLOADING, ResetRoomAfterRace; the client at SG_STARTLOADING
+// and SG_NEWCLIENT). One log line per count sent ("is watched by"), and,
+// with --watchlog, one per report stored ("now watching").
 
+// The seats watching racer t (1111, Matt): cameras on t's kart, by their
+// CG_WATCH - a spectator caught up (2) or a player (0: over the line or out;
+// a racer's client reports nobody). A spectator still held (1) is not
+// counted till its catch-up (CG_STARTRACE), as in 1110.
+static int Watch_Count(RoomInfo* ri, int t)
+{
+	int n = 0;
 	for (int i = 0; i < MAX_CLIENTS; i++)
-		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].spectator == 2)
+	{
+		const PeerInfo* pi = &ri->peerInfos[i];
+		if (i != t && pi->peer != 0 && pi->spectator != 1 && pi->watching == t + 1)
 			n++;
+	}
+	return n;
+}
+
+// Racer t told its own count (SG_LOBBYCOUNTDOWN's LOBBYCOUNT_WATCHERS: its
+// HUD's WATCHERS, playerCount.c, shown at 1 and more) if it changed since it
+// was last told. Nobody else is ever sent it. A seat with no player, or a
+// spectator's, is never a racer watched.
+static void Watch_Tell(RoomInfo* ri, int t)
+{
+	PeerInfo* pt;
+	struct SG_MessageLobbyCountdown sg;
+	int n;
+
+	if (t < 0 || t >= MAX_CLIENTS) return;
+	pt = &ri->peerInfos[t];
+	if (pt->peer == 0 || pt->spectator != 0) return;
+	n = Watch_Count(ri, t);
+	if (n == pt->watchersTold) return;
+	pt->watchersTold = (unsigned char)n;
 
 	sg.type = SG_LOBBYCOUNTDOWN;
 	sg.kind = LOBBYCOUNT_WATCHERS;
 	sg.seconds = (unsigned char)n;
-	broadcastToPeersReliable(ri, &sg, sizeof(struct SG_MessageLobbyCountdown));
+	sendToPeerReliable(pt->peer, &sg, sizeof(struct SG_MessageLobbyCountdown));
 
 	PrintPrefix((int)(ri - roomInfos) + 1);
-	printf("%d spectator%s watching the race, the racers told\n", n, n == 1 ? "" : "s");
+	printf("Player %.*s (%d) is watched by %d\n", NAME_LEN, &pt->name[0], t, n);
+}
+
+// Seat id's camera on racer t (CG_WATCH; WATCH_NOBODY or any refusal:
+// nobody): only in a race (boolLoadAll), only a seat racing in it (raceSeats)
+// with its player still in, a player's, not its own. The racer it left and
+// the one it is on now told. A refusal is stored as nobody too, so a seat
+// that sends one is off its old target.
+static void Watch_Set(RoomInfo* ri, int id, int t)
+{
+	PeerInfo* pi = &ri->peerInfos[id];
+	int was = (int)pi->watching - 1;
+
+	if (!ri->boolLoadAll || t < 0 || t >= MAX_CLIENTS || t == id ||
+		((ri->raceSeats >> t) & 1) == 0 || ri->peerInfos[t].peer == 0 ||
+		ri->peerInfos[t].spectator != 0)
+		t = -1;
+	if (t == was) return;
+	pi->watching = (unsigned char)(t + 1);
+
+	// (--watchlog only, for the tests and probes, as --kicklog's votes: a
+	// public server's console gets the counts sent, below, not every
+	// camera's move - a watcher flicking through the racers, who watches
+	// whom)
+	if (watchLog)
+	{
+		PrintPrefix((int)(ri - roomInfos) + 1);
+		if (t < 0) printf("Player %.*s (%d) now watching nobody\n", NAME_LEN, &pi->name[0], id);
+		else printf("Player %.*s (%d) now watching %.*s (%d)\n", NAME_LEN, &pi->name[0], id,
+			NAME_LEN, &ri->peerInfos[t].name[0], t);
+	}
+
+	Watch_Tell(ri, was);
+	Watch_Tell(ri, t);
+}
+
+// Seat id gone (ProcessDisconnectEvent, its peer already NULL): the racer it
+// watched told one fewer; nobody watches it any more (it has no peer to tell).
+static void Watch_Leave(RoomInfo* ri, int id)
+{
+	int was = (int)ri->peerInfos[id].watching - 1;
+	ri->peerInfos[id].watching = 0;
+	ri->peerInfos[id].watchersTold = 0;
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (ri->peerInfos[i].watching == id + 1)
+			ri->peerInfos[i].watching = 0;
+	Watch_Tell(ri, was);
 }
 
 // ------------------------------------------------------------- idle clock
@@ -1004,14 +1122,17 @@ static int SpectateSeat(RoomInfo* ri)
 
 // Can the race in this room be watched right now (1110: a join with
 // JOIN_SPECTATE takes a seat in it as a spectator, CG_JOINROOM)? Only while
-// it runs: past its green - a round's lights still showing (roundGreenAt)
-// could yet call the round off, which a spectator's SG_STARTLOADING would
-// already have said otherwise - and not over (boolEndAll: the results
-// countdown, too short for a load); not in the last SPECTATE_CLOSE_SECONDS
-// before the lobby-return timer forces the room back (a load takes a good
-// part of them, and a spectator arriving as the room resets would come into
-// a lobby still loading); and with a seat to give (SpectateSeat). Never in a
-// page of rooms not on offer (ROOM_OPEN_INDEX), nor with --nospectate.
+// it runs: past its green - every race's (raceGreenAt, 1111, Matt: JOIN ROOM
+// greyed until the green; 1110 opened a plain race at its lights' start),
+// and a round's lights still showing (roundGreenAt, the round not yet
+// decided at its green by Round_Tick) could yet call the round off, which a
+// spectator's SG_STARTLOADING would already have said otherwise - and not
+// over (boolEndAll: the results countdown, too short for a load); not in the
+// last SPECTATE_CLOSE_SECONDS before the lobby-return timer forces the room
+// back (a load takes a good part of them, and a spectator arriving as the
+// room resets would come into a lobby still loading); and with a seat to
+// give (SpectateSeat). Never in a page of rooms not on offer
+// (ROOM_OPEN_INDEX), nor with --nospectate.
 // (SPECTATE_ENABLED, SPECTATE_CLOSE_SECONDS: SV_config.h)
 static int RoomOpenForSpectate(RoomInfo* ri)
 {
@@ -1021,11 +1142,44 @@ static int RoomOpenForSpectate(RoomInfo* ri)
 	if (!ri->boolRaceAll || ri->boolEndAll || ri->roundGreenAt != 0)
 		return 0;
 
+	if (ri->raceGreenAt != 0 && (int)(enet_time_get() - ri->raceGreenAt) < 0)
+		return 0;
+
 	if (ri->firstEndTime != 0 &&
 		(int)(enet_time_get() - ri->firstEndTime) >= (LOBBY_RETURN_SECONDS - SPECTATE_CLOSE_SECONDS) * 1000)
 		return 0;
 
 	return SpectateSeat(ri) >= 0;
+}
+
+// Is this room in a race (1111: SG_MessageRooms.racingMask)? From its
+// SG_STARTLOADING to its reset - the countdown, the load, the start line,
+// the lights, the race, its results - on a server that lets races be watched
+// (with --nospectate the room list keeps 1110's Waiting to Join alone), in
+// a page on offer. RoomOpenForSpectate is never true without it.
+static int RoomInRace(RoomInfo* ri)
+{
+	return spectateEnabled && ROOM_OPEN_INDEX((int)(ri - roomInfos)) &&
+		(ri->boolLoadAll || ri->boolRaceAll);
+}
+
+// What the room list says of this room (SendRoomData), as it was last
+// pushed for a change of its own (ServerState_Tick; ResetRoomAfterRace):
+// whether it can be joined, whether its race can be watched, whether it is
+// in a race (1111). 1 if any of the three moved since, the record brought up
+// to date - and the list is the caller's to push.
+static int RoomList_Changed(RoomInfo* ri)
+{
+	char closed = (char)!RoomOpenForJoin(ri);
+	char watch = (char)RoomOpenForSpectate(ri);
+	char racing = (char)RoomInRace(ri);
+
+	if (closed == ri->boolJoinClosed && watch == ri->boolSpectateOpen && racing == ri->boolRaceShown)
+		return 0;
+	ri->boolJoinClosed = closed;
+	ri->boolSpectateOpen = watch;
+	ri->boolRaceShown = racing;
+	return 1;
 }
 
 // The host's clock runs for the track and lap pick, and the whole room is
@@ -2239,6 +2393,12 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 				KickVote_Check(ri);   // only the wipe, with nothing to count
 		}
 
+		// The racer the leaver's camera was on is told one fewer, and
+		// nobody watches the leaver any more (Watch_Leave, 1111). Above the
+		// silent leave's early return below too: a watcher is a spectator or
+		// a player over the line, both of whom leave that way.
+		Watch_Leave(ri, peerID);
+
 		// Host migration. Must sit ABOVE the boolEndSelf early return below:
 		// a host who quits after crossing the finish line takes that return,
 		// and the promotion would be skipped every single time - which is the
@@ -2284,13 +2444,10 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 		// A spectator's leave (1110) is as silent, whatever its race's state
 		// (its boolEndSelf is set from its join, but not once a reset left
 		// its welcome pending): the racers were never told its name, so an
-		// empty one would tell them nothing - and one watching takes 1 off
-		// the racers' WATCHERS (Watchers_Send: its seat is already emptied,
-		// so the count leaves it out).
+		// empty one would tell them nothing. The one fewer on the WATCHERS of
+		// the racer it watched is Watch_Leave's, above (1111).
 		if (ri->peerInfos[peerID].boolEndSelf != 0 || ri->peerInfos[peerID].spectator != 0)
 		{
-			if (ri->peerInfos[peerID].spectator == 2)
-				Watchers_Send(ri);
 			ForeachPeerLPL(SendRoomData);
 			return;
 		}
@@ -2391,6 +2548,7 @@ static size_t MinPacketSize(int type)
 		case CG_WEAPONEVENT: return sizeof(struct CG_MessageWeaponEvent);
 		case CG_HOSTACTION: return sizeof(struct CG_MessageHostAction);
 		case CG_VOTE:       return sizeof(struct CG_MessageVote);
+		case CG_WATCH:      return sizeof(struct CG_MessageWatch);
 		default:           return (size_t)-1;
 	}
 }
@@ -2615,8 +2773,9 @@ static void KartClaim_Relay(RoomInfo* ri, ENetPeer* peer, int peerID, const stru
 // CG_STARTRACE says its race is loaded: it is caught up in one go, in order
 // - the karts where they are, the round's verdicts, the finishes, the
 // lobby's clock - and started (Spectator_CatchUp); from then on it is
-// watching and gets every message the room gets, and the racers are told
-// how many watch (Watchers_Send). Nothing it sends of a race or a lobby
+// watching and gets every message the room gets, and the racer its camera
+// is on is told one more watches them (Watch_*, 1111; in 1110 every racer
+// was told the room's spectators). Nothing it sends of a race or a lobby
 // counts (SPECTATOR_DROPS), its name never reaches a racer mid-race, and it
 // is in no race rule and no lobby count (Round_IsIn, Vote_Voter,
 // Room_Players, WeaponHold_Window, PickNewHost's preference) - but it holds
@@ -2929,6 +3088,8 @@ static void Spectator_Welcome(RoomInfo* ri, int id)
 	pi->boolLoadSelf = 0;
 	pi->boolRaceSelf = 0;
 	pi->boolEndSelf = 0;
+	pi->watching = 0;       // (1111: its camera on nobody now - the reset cleared it too)
+	pi->watchersTold = 0;
 	IdleReset(pi);
 
 	EnsureHost(ri, id);
@@ -2972,8 +3133,9 @@ static void Spectator_Welcome(RoomInfo* ri, int id)
 // lobby's (CG_CHARACTER, CG_TRACK, CG_TRACKCANCEL, CG_VOTE, CG_HOSTACTION -
 // it is in no lobby until the reset makes it a player). A client of this
 // release sends none of them (CL_main.cpp); this is the check that does not
-// lean on that. Its CG_NAME and CG_STARTRACE are its own (Spectator_Name,
-// CG_STARTRACE).
+// lean on that. Its CG_NAME, CG_STARTRACE and CG_WATCH are its own
+// (Spectator_Name, CG_STARTRACE; Watch_Set, 1111: its camera is the very
+// thing a racer's WATCHERS counts).
 #define SPECTATOR_DROPS ((1u << CG_RACEDATA) | (1u << CG_WEAPON) | (1u << CG_WEAPONEVENT) | (1u << CG_ENDRACE) | \
 	(1u << CG_CHARACTER) | (1u << CG_TRACK) | (1u << CG_TRACKCANCEL) | (1u << CG_VOTE) | (1u << CG_HOSTACTION))
 
@@ -3625,6 +3787,17 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			break;
 		}
 
+		case CG_WATCH:
+		{
+			// The kart this player's camera follows now (1111, Watch_Set): a
+			// spectator's, or a player's over the line or out of a round - the
+			// racers it leaves and lands on told their counts. A peer in no
+			// room never gets here (above).
+			struct CG_MessageWatch* r = (struct CG_MessageWatch*)recvBuf;
+			Watch_Set(ri, peerID, r->target);
+			break;
+		}
+
 		case CG_STARTRACE:
 		{
 			PeerInfo* pi = &ri->peerInfos[peerID];
@@ -3636,7 +3809,9 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// A spectator's (1110): its race is loaded. The room reset while
 			// it loaded: welcomed into the lobby now (Spectator_Welcome).
 			// Otherwise caught up and watching (Spectator_CatchUp), and the
-			// racers told how many watch (Watchers_Send). Either way it writes
+			// racer its camera is on (a CG_WATCH stored while it was held)
+			// told it counts now (Watch_Tell, 1111) - after the catch-up's
+			// private SG_STARTRACE, as 1110's count was. Either way it writes
 			// no boolRaceSelf - and first, ahead of the lobby's test below: a
 			// welcome's CG_STARTRACE always comes once the reset has cleared
 			// boolLoadAll, and its boolRaceSelf, never cleared at the next
@@ -3651,7 +3826,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 					{
 						Spectator_CatchUp(ri, peerID);
 						pi->spectator = 2;
-						Watchers_Send(ri);
+						Watch_Tell(ri, (int)pi->watching - 1);
 					}
 				}
 				break;
@@ -4309,6 +4484,25 @@ void ServerState_FirstBoot(int argc, char** argv)
 			// the bot drives on (1110)
 			botFinishBot = 1;
 		}
+		else if (strcmp(argv[i], "--botwatch") == 0 && i + 1 < argc)
+		{
+			// the target a spectator bot (from its catch-up, or from its
+			// load with --botspecload) and a --botfinish bot (after its
+			// CG_ENDRACE) report their camera on, CG_WATCH (1111): a client
+			// ID, or 15 for nobody (WATCH_NOBODY); out of 0-15, none sent
+			botWatch = atoi(argv[i + 1]);
+			if (botWatch < 0 || botWatch > WATCH_NOBODY) botWatch = -1;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botload") == 0 && i + 1 < argc)
+		{
+			// seconds a racing bot "loads" (1111: its CG_STARTRACE after
+			// SG_STARTLOADING), holding the room at the start line; 0 as
+			// ever, 3-5 s
+			botLoadSecs = atoi(argv[i + 1]);
+			if (botLoadSecs < 0) botLoadSecs = 0;
+			i++;
+		}
 #endif
 		else if (strcmp(argv[i], "--votesecs") == 0)
 		{
@@ -4362,6 +4556,14 @@ void ServerState_FirstBoot(int argc, char** argv)
 			// for testing only - the votes are secret, and a server's console
 			// is read by whoever runs it, who may be playing in the room
 			kickVoteLog = 1;
+		}
+		else if (strcmp(argv[i], "--watchlog") == 0)
+		{
+			// every camera's report in the log, who watches whom (1111,
+			// Watch_Set: "now watching"): for testing only, as --kicklog -
+			// the counts the racers are told ("is watched by") are logged
+			// without it
+			watchLog = 1;
 		}
 		else if (strcmp(argv[i], "--nospectate") == 0)
 		{
@@ -4639,6 +4841,7 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 	ri->endTime = 0;
 	ri->firstEndTime = 0;
 	ri->watchDeadline = 0;
+	ri->raceGreenAt = 0;   // (1111: no race to watch until the next one's green)
 
 	// No game mode's round any more (Round_*): nothing judged, no clock, and
 	// every seat's place gone (Round_Begin clears them again at the next
@@ -4662,12 +4865,23 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 		ri->peerInfos[i].cause = 0;
 		ri->peerInfos[i].lapsDone = 0;
 		ri->peerInfos[i].kickVotes = 0;
+
+		// (1111) nobody watching anybody, and nobody told a count: every
+		// client cleared its WATCHERS at the SG_NEWCLIENT above, and a count
+		// of 1 again next race would otherwise equal watchersTold and go
+		// untold. Nothing sent.
+		ri->peerInfos[i].watching = 0;
+		ri->peerInfos[i].watchersTold = 0;
 	}
 
 	// Back in the lobby with fresh budgets; the host's clock starts (not a
 	// host whose welcome is pending, 1110: ArmHostIdle, Spectator_Welcome).
 	ArmHostIdle(ri);
 
+	// The list as it goes out now is the room's as the tick knows it (1111,
+	// RoomList_Changed): open again, no race - so the tick's own push, which
+	// runs after this in the same pass, does not send it a second time.
+	RoomList_Changed(ri);
 	ForeachPeerLPL(SendRoomData); //race over, re-notify all clients
 }
 
@@ -4708,22 +4922,6 @@ void ServerState_Tick()
 		// same tick)
 		Round_Tick(ri);
 		Tag_Tick(ri);
-
-		// The room list says whether this room can be joined, and that can
-		// change on its own as a clock runs down (RoomOpenForJoin): push a
-		// fresh list to everybody the moment it does. Likewise whether its
-		// race can be watched (1110, RoomOpenForSpectate): a round's green,
-		// the close before the forced return, a seat given or freed.
-		{
-			char closed = !RoomOpenForJoin(ri);
-			char watch = (char)RoomOpenForSpectate(ri);
-			if (closed != ri->boolJoinClosed || watch != ri->boolSpectateOpen)
-			{
-				ri->boolJoinClosed = closed;
-				ri->boolSpectateOpen = watch;
-				ForeachPeerLPL(SendRoomData);
-			}
-		}
 
 		// A spectator still held SPECTATE_LOAD_SECONDS after it sat down
 		// (1110, SV_config.h): its name never came, or its load never ended.
@@ -4817,9 +5015,13 @@ void ServerState_Tick()
 
 				// The race as a spectator will join it (1110, Spectator_*):
 				// the seats racing - none other is ever given to one - and
-				// nothing of it yet, no finish and no kart message.
+				// nothing of it yet, no finish and no kart message, no green
+				// (raceGreenAt, 1111) - and nobody's camera on anybody, nobody
+				// told a count (Watch_*, 1111: every client clears its
+				// WATCHERS at this message; nothing sent).
 				ri->raceSeats = 0;
 				ri->endCount = 0;
+				ri->raceGreenAt = 0;
 				for (int k = 0; k < MAX_CLIENTS; k++)
 				{
 					if (ri->peerInfos[k].peer != 0)
@@ -4827,6 +5029,8 @@ void ServerState_Tick()
 					ri->peerInfos[k].endOrder = 0;
 					ri->peerInfos[k].endFlags = 0;
 					ri->peerInfos[k].hasLastKart = 0;
+					ri->peerInfos[k].watching = 0;
+					ri->peerInfos[k].watchersTold = 0;
 				}
 
 				// send to all clients, the game modes' round seated now
@@ -4891,6 +5095,11 @@ void ServerState_Tick()
 				sg.padding = 0;
 				broadcastToPeersReliable(ri, &sg, sizeof(struct SG_Header));
 
+				// its green, the lights from now (1111): watched from there
+				// (RoomOpenForSpectate; Matt: JOIN ROOM greyed until the
+				// green), its list pushed then by the room-list check below
+				ri->raceGreenAt = (enet_time_get() + TAG_LIGHTS_MS) | 1;
+
 				// the game modes' round refereed from here, if it still has
 				// 2 players (TAG's first "it" told after this message)
 				Round_Green(ri);
@@ -4951,6 +5160,20 @@ void ServerState_Tick()
 				ResetRoomAfterRace(ri);
 			}
 		}
+
+		// The room list says whether this room can be joined, and that can
+		// change on its own as a clock runs down (RoomOpenForJoin): push a
+		// fresh list to everybody the moment it does. Likewise whether its
+		// race can be watched (1110, RoomOpenForSpectate): a green, the close
+		// before the forced return, a seat given or freed; and whether it is
+		// in a race (1111, RoomInRace): its load - a room shown closed
+		// already by a pick clock's last seconds still gets a list then.
+		// Last in the room's pass (1111), so each list says what this tick
+		// made of the room: the SG_STARTLOADING above is in the list that
+		// goes out with it, not a tick later (the reset's own push records
+		// itself: RoomList_Changed).
+		if (RoomList_Changed(ri))
+			ForeachPeerLPL(SendRoomData);
 	}
 }
 

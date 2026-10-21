@@ -25,11 +25,11 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1110
-#define SERVER_VERSION 1110
+#define VERSION 1111
+#define SERVER_VERSION 1111
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
-// defined before it includes this header; 1110). One from another release
+// defined before it includes this header; 1111). One from another release
 // than this header must not build: it would relay messages of a size and
 // meaning this header no longer gives them (an 1103 relay of 1104's kart
 // message sends no lap word, and every kart's place goes wrong).
@@ -104,8 +104,15 @@
 // the game, and their kart drives on: their CG_ENDRACE says so
 // (ENDRACE_BOT), the server's SG_ENDRACE passes it on, and the other
 // machines hold no brake on that copy (octr->copyParked). SV_main.c checks
-// for this to catch a stale global.h.
-#define NET_SPECTATE 1
+// for this to catch a stale global.h. 2 (1111): each racer told only of
+// those watching them (CG_WATCH, LOBBYCOUNT_WATCHERS to the racer watched) -
+// the seats whose cameras are on its kart, a spectator's or a player's over
+// the line or out (Matt, 1111); the room list's racingMask (ROOM_RACING), a
+// room in a race from its load to its reset, which opens RACE IN PROGRESS
+// before the race can be watched; and a plain race watched from its green,
+// not its lights (the server's raceGreenAt; Matt, 1111: JOIN ROOM greyed
+// until the green).
+#define NET_SPECTATE 2
 
 // A vote: VOTE_NONE (the host picks, or no pick due), VOTE_TRACK, VOTE_LAPS.
 // Each runs VOTE_SECONDS, or until every player has voted (the server's
@@ -284,20 +291,29 @@
 #define RANK_SPLIT_RIGHT (RANK_SPLIT_X + 5 * RANK_SMALL_W + 2 * RANK_SMALL_P)   // 156
 
 // octr->clientCount[room], as the client hands the room list (SG_ROOMS) to
-// the ROM: the players in it (0 to MAX_NUM_PLAYERS) plus ROOM_CLOSED when the
-// server lets nobody in now (RoomOpenForJoin, SV_main.c). A full room is not
-// joinable either. Up to 8 players "closed" was +8 on the count. And
-// ROOM_SPECTATE (1110), the char's last bit, unused before: the race in it
-// can be watched now - past its green, not over, with a seat that was empty
-// at its load (RoomOpenForSpectate, SV_main.c; SG_MessageRooms.spectateMask)
-// - which the room list offers as MATCH IN PROGRESS, SPECTATE on a row that
-// cannot be joined (hostOptions.c). Every reader of the count masks it out
-// (ROOM_PLAYERS, ROOM_JOINABLE).
+// the ROM: the players in it (0 to MAX_NUM_PLAYERS, the low 5 bits - the
+// client clamps the count to the seats, so bit 0x10 stays 0) plus three
+// flags. ROOM_CLOSED: the server lets nobody in now (RoomOpenForJoin,
+// SV_main.c); a full room is not joinable either. Up to 8 players "closed"
+// was +8 on the count. ROOM_SPECTATE (1110), the char's last bit, unused
+// before: the race in it can be watched now - past its green, not over,
+// with a seat that was empty at its load (RoomOpenForSpectate, SV_main.c;
+// SG_MessageRooms.spectateMask) - RACE IN PROGRESS's JOIN ROOM lit
+// (hostOptions.c). ROOM_RACING (1111; the count's sixth bit before, always
+// 0): the room is in a race - loading, at the start line, racing or on its
+// results (RoomInRace, SV_main.c; SG_MessageRooms.racingMask) - and CROSS
+// on its row, if it cannot be joined, opens RACE IN PROGRESS, JOIN ROOM
+// greyed until the green (Matt, 1111). ROOM_IN_RACE takes either bit, should
+// a server ever send ROOM_SPECTATE alone: the same single andi as one bit's
+// test. Every reader of the count masks the flags out (ROOM_PLAYERS,
+// ROOM_JOINABLE; the assert under MAX_NUM_PLAYERS).
+#define ROOM_RACING      0x20   // (1111) in a race: SG_MessageRooms.racingMask
 #define ROOM_CLOSED      0x40
 #define ROOM_SPECTATE    0x80
-#define ROOM_PLAYERS(c)  ((c) & 0x3F)
+#define ROOM_PLAYERS(c)  ((c) & 0x1F)
 #define ROOM_JOINABLE(c) ((((c) & ROOM_CLOSED) == 0) && (ROOM_PLAYERS(c) < MAX_NUM_PLAYERS))
 #define ROOM_SPECTATABLE(c) (((c) & ROOM_SPECTATE) != 0)
+#define ROOM_IN_RACE(c)  (((c) & (ROOM_RACING | ROOM_SPECTATE)) != 0)
 // a number in a string literal ("/" OCTR_STR(MAX_NUM_PLAYERS))
 #define OCTR_STR2(x) #x
 #define OCTR_STR(x)  OCTR_STR2(x)
@@ -351,6 +367,10 @@ enum ClientState
 // Was 9 up to build 1039: a change here is a protocol change (SERVER_VERSION).
 #define NAME_LEN 7
 #define MAX_NUM_PLAYERS 12
+// octr->clientCount's count and its flags apart (ROOM_PLAYERS, above; 1111):
+// the seats fit under the mask, and no flag bit is in it
+STATIC_ASSERT2(MAX_NUM_PLAYERS <= ROOM_PLAYERS(0xFF) &&
+	(ROOM_PLAYERS(0xFF) & (ROOM_RACING | ROOM_CLOSED | ROOM_SPECTATE)) == 0, "clientCount: the flags clear of the count");
 // A remote slot's controller, which the PC client writes the slot's buttons
 // into: the game's gamepad[slot] (0x80096804, 0x50 apart) for slots 1-7; for
 // 8-9 the same + 0x1000, and for 10-11 + 0x1020, in the game tracker's
@@ -541,14 +561,16 @@ struct OnlineCTR
 	char lastWindowsClientSync;
 
 	// 0x169 (1110), in what was the alignment gap up to readyToSend: the
-	// spectators watching this race - players who joined it in progress,
-	// caught up (spectate.c on their machines) - 0 to MAX_NUM_PLAYERS, from
-	// the server's SG_LOBBYCOUNTDOWN with LOBBYCOUNT_WATCHERS, sent as one
-	// starts watching and as one leaves. Written by the client only;
-	// cleared at SG_NEWCLIENT, SG_STARTLOADING and a drop, not with the
-	// round (Round_Clear also runs at the green). The ROM reads it for the
-	// racers' WATCHERS on the HUD (playerCount.c), shown while it is 1 or
-	// more.
+	// players watching this machine's kart now (1111, Matt; the room's
+	// spectators in 1110) - their cameras on it: spectators caught up
+	// (spectate.c on their machines), players over the line or out
+	// (endOfRaceUI.c's Spectate) - 0 to MAX_NUM_PLAYERS - 1, from the
+	// server's SG_LOBBYCOUNTDOWN with LOBBYCOUNT_WATCHERS, sent to this
+	// player alone as the count changes (CG_WATCH, Watch_Tell in SV_main.c).
+	// Written by the client only; cleared at SG_NEWCLIENT, SG_STARTLOADING
+	// and a drop, not with the round (Round_Clear also runs at the green).
+	// The ROM reads it for the racer's WATCHERS on the HUD (playerCount.c),
+	// shown while it is 1 or more.
 	unsigned char watchers;
 
 	// 0x16A (1110), the same gap: the other players' karts this machine's
@@ -1245,14 +1267,23 @@ struct SG_MessageRooms
 	unsigned short closedMask;
 
 	// bit N: the race in room N+1 can be watched now (1110,
-	// RoomOpenForSpectate: past its green, not over, a seat that was empty at
+	// RoomOpenForSpectate: past its green - raceGreenAt (Matt, 1111; 1110
+	// opened a plain race at its lights) - not over, a seat that was empty at
 	// its load, not near the forced return to the lobby), less the rooms this
 	// player was voted out of a short while ago - octr->clientCount's
-	// ROOM_SPECTATE. Read only once the version above has passed: a server
-	// from another release sends a list 14 bytes long.
+	// ROOM_SPECTATE. Read, as racingMask below, only once the version above
+	// has passed: the list is 18 bytes from 1111 on.
 	unsigned short spectateMask;
 
-	// 16 bytes total
+	// bit N: room N+1 is in a race now (1111, RoomInRace): loading, at the
+	// start line, racing or on its results - SG_STARTLOADING to the reset -
+	// on a server that lets races be watched, less the rooms this player was
+	// voted out of a short while ago: octr->clientCount's ROOM_RACING, which
+	// opens RACE IN PROGRESS (hostOptions.c) before the race can be watched.
+	// Every bit of spectateMask is set here too.
+	unsigned short racingMask;
+
+	// 18 bytes total
 };
 
 // sent to each user when someone connects
@@ -1443,17 +1474,21 @@ struct SG_MessageEndRace
 // Sent at the first and at the last CG_ENDRACE. The length travels with the
 // message so it is a server setting, not something baked into the ROM.
 // kind (1110; was padding, always 0): LOBBYCOUNT_CLOCK that clock, as ever;
-// LOBBYCOUNT_WATCHERS, the spectators now watching the room's race in
-// seconds' place (Watchers_Send, SV_main.c: as one has caught up and as one
-// leaves), which the racers' HUD shows as WATCHERS (octr->watchers).
+// LOBBYCOUNT_WATCHERS, in seconds' place, the players watching this racer
+// (1111, Matt; the room's spectators, broadcast, in 1110) - their cameras
+// on its kart, by their CG_WATCH: spectators caught up, players over the
+// line or out - sent to this racer alone as it changes (Watch_Tell,
+// SV_main.c), which its HUD shows as WATCHERS (octr->watchers).
 struct SG_MessageLobbyCountdown
 {
 	// 15 types, 15 bytes max
 	unsigned char type : 4;
 	unsigned char kind : 4;
 
-	// seconds until the room resets - or, LOBBYCOUNT_WATCHERS, the
-	// spectators watching
+	// seconds until the room resets - or, LOBBYCOUNT_WATCHERS, the players
+	// watching this racer (their cameras on its kart: spectators caught up,
+	// players over the line or out), sent to this racer alone as it changes
+	// (Watch_Tell, SV_main.c)
 	unsigned char seconds;
 };
 
@@ -1464,7 +1499,7 @@ STATIC_ASSERT2(sizeof(struct SG_Header) == 1, "Size of SG_Header must be 1 byte"
 STATIC_ASSERT2(sizeof(struct SG_MessageHost) == 1, "Size of SG_MessageHost must be 1 byte");
 STATIC_ASSERT2(sizeof(struct SG_MessageVote) == 3 + MAX_NUM_PLAYERS, "Size of SG_MessageVote must be 3 + MAX_NUM_PLAYERS bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageKickVote) == 4, "Size of SG_MessageKickVote must be 4 bytes");
-STATIC_ASSERT2(sizeof(struct SG_MessageRooms) == 16, "Size of SG_MessageRooms must be 16 bytes");
+STATIC_ASSERT2(sizeof(struct SG_MessageRooms) == 18, "Size of SG_MessageRooms must be 18 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageClientStatus) == 2, "Size of SG_MessageClientStatus must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageName) == 2 + NAME_LEN + 1, "Size of SG_MessageName must be 2 + NAME_LEN + 1 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageCharacter) == 2, "Size of SG_MessageCharacter must be 2 bytes");
@@ -1473,15 +1508,18 @@ STATIC_ASSERT2(sizeof(struct SG_EverythingKart) == 18, "Size of SG_EverythingKar
 STATIC_ASSERT2(sizeof(struct SG_MessageWeapon) == 16, "Size of SG_MessageWeapon must be 16 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageWeaponEvent) == 4, "Size of SG_MessageWeaponEvent must be 4 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageEndRace) == 12, "Size of SG_MessageEndRace must be 12 bytes");
-// flags in the gap, the times where they were (1110)
+// flags in the gap, the times where they were (1110); the room list's masks
+// at the end (spectateMask 1110, racingMask 1111)
 #ifdef __GNUC__
 STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageEndRace, flags) == 1, "SG_MessageEndRace layout: flags");
 STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageEndRace, courseTime) == 4, "SG_MessageEndRace layout: courseTime");
 STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageRooms, spectateMask) == 14, "SG_MessageRooms layout: spectateMask");
+STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageRooms, racingMask) == 16, "SG_MessageRooms layout: racingMask");
 #else
 STATIC_ASSERT2(offsetof(struct SG_MessageEndRace, flags) == 1, "SG_MessageEndRace layout: flags");
 STATIC_ASSERT2(offsetof(struct SG_MessageEndRace, courseTime) == 4, "SG_MessageEndRace layout: courseTime");
 STATIC_ASSERT2(offsetof(struct SG_MessageRooms, spectateMask) == 14, "SG_MessageRooms layout: spectateMask");
+STATIC_ASSERT2(offsetof(struct SG_MessageRooms, racingMask) == 16, "SG_MessageRooms layout: racingMask");
 #endif
 STATIC_ASSERT2(sizeof(struct SG_MessageLobbyCountdown) == 2, "Size of SG_MessageLobbyCountdown must be 2 bytes");
 
@@ -1530,6 +1568,12 @@ enum ClientGiveMessageType
 
 	// a player's vote, while one runs (CG_MessageVote, SG_VOTE)
 	CG_VOTE,
+
+	// (1111) the kart this player's camera follows - a spectator's, or a
+	// player's over the line or out - as it changes (CG_MessageWatch,
+	// Watch_Service, CL_main.cpp): the server counts each racer's watchers
+	// and tells them (SG_LOBBYCOUNTDOWN's LOBBYCOUNT_WATCHERS)
+	CG_WATCH,
 
 	CG_COUNT
 };
@@ -1726,6 +1770,24 @@ struct CG_MessageEndRace
 	int lapTime;
 };
 
+// The kart this player's camera is on (1111, Matt: a racer's WATCHERS counts
+// whoever watches them), sent once it has held still a moment and differs
+// from the last one sent (the client's WATCH_SETTLE_MS: RIGHT/LEFT flicked
+// through the racers reports none of them), reliable, in order with
+// CG_ENDRACE. target: the client ID watched, or WATCH_NOBODY - the own kart
+// (its finish's flash, its out hold, its own bot), SPECTATING, a load. The
+// server counts it from any seat but a spectator still held (counted from
+// its catch-up), and stores a target that is no racer in this race - the
+// sender itself, a spectator's seat, a seat empty or left, or before the
+// load - as nobody (Watch_Set, SV_main.c). On the wire 0x0C | target << 4:
+// watching nobody is 0xFC.
+#define WATCH_NOBODY 0xF   // CG_MessageWatch.target: no other kart (the own, its bot, SPECTATING, the finish's flash)
+struct CG_MessageWatch
+{
+	unsigned char type : 4;     // CG_WATCH
+	unsigned char target : 4;   // the client ID watched, WATCH_NOBODY none
+};
+
 #define DRIVER_COURSE_OFFSET 0x514
 #define DRIVER_BESTLAP_OFFSET 0x63c
 
@@ -1740,6 +1802,9 @@ STATIC_ASSERT2(sizeof(struct CG_MessageWeaponEvent) == 4, "Size of CG_MessageWea
 STATIC_ASSERT2(sizeof(struct CG_MessageHostAction) == 2 + NAME_LEN, "Size of CG_MessageHostAction must be 2 + NAME_LEN bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageVote) == 2, "Size of CG_MessageVote must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageEndRace) == 12, "Size of CG_MessageEndRace must be 12 bytes");
+STATIC_ASSERT2(sizeof(struct CG_MessageWatch) == 1, "Size of CG_MessageWatch must be 1 byte");
+STATIC_ASSERT2(WATCH_NOBODY >= MAX_NUM_PLAYERS, "WATCH_NOBODY no seat");
+STATIC_ASSERT2(CG_COUNT <= 16, "CG_* types: 4 bits on the wire (SPECTATOR_DROPS too)");
 
 // Quick Play's status query: one UDP datagram to a server's own port and
 // one back, outside ENet - no connection, so nothing that counts a player
