@@ -38,6 +38,8 @@ docker compose up --build
 
 The port is UDP; without `-p` the server asks for one, and Enter alone takes 5501 (`DEFAULT_PORT`
 in `SV_config.h`). `--banlist <file>` reads IPv4 addresses to refuse, one per line.
+`--nospectate` stops players from joining a race in progress as spectators (on by default:
+`SPECTATE_ENABLED` in `SV_config.h`).
 
 ### Configuration
 
@@ -125,7 +127,7 @@ client and server check each other on, and steps only when a release changes the
 message struct or type in `global.h`, what the server does in reply to one, or the seats in a room
 (`MAX_NUM_PLAYERS`, though no message changes size). A release that leaves `SERVER_VERSION` alone
 needs no server update; every server already running keeps accepting the new client. Both show in
-the server's console banner as `Build 1109, Server 1109`.
+the server's console banner as `Build 1110, Server 1110`.
 
 `SV_main.c` and `global.h` always come from the same release: `SV_main.c` names the protocol it
 was written for (`SV_PROTOCOL`), and a `global.h` from another release refuses to build with it.

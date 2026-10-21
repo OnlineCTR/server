@@ -52,9 +52,38 @@
 //     bot's kart is only a copy on the human's machine, and only a kart's
 //     own machine tests hits on it (netWeapons.c); that takes two
 //     DuckStations.
-//   - removed (a kick, an idle clock): back on the room list, connected
-//     again a few seconds later. (A kick keeps 127.0.0.1 - every bot - out
-//     of that room for the kick ban's time.)
+//   - with --botkick N: a vote to kick the player in seat N (CG_HOSTACTION's
+//     HOST_ACTION_KICKVOTE, by the name SG_NAME gave the seat) a few seconds
+//     after the seat is named, in every lobby - the countdown wipes the
+//     votes - so KICK_VOTES_BY_PLAYERS's counts can be tried at any size of
+//     room from one DuckStation (the server's --kicklog shows each vote).
+//     The server's answer to it (SG_VOTE's VOTE_KICK_REPLY) is no vote of
+//     the room's, and is not taken for one.
+//   - with --botspectate N (1110): the last N bots join only to watch - on
+//     the room list, the fullest room whose race can be watched (SG_ROOMS'
+//     spectateMask), with JOIN_SPECTATE - and, seated as a spectator
+//     (SG_NEWCLIENT's NEWCLIENT_SPECTATOR), send their name, "load" the race
+//     the answer gives them (CG_STARTRACE a few seconds after its
+//     SG_STARTLOADING) and watch from the catch-up's SG_STARTRACE, reporting
+//     nothing; the room's reset welcomes them as players (special 0), and
+//     from there they are ordinary bots. --botspecname S holds a spectator's
+//     CG_NAME S seconds (a race over between a join and its name),
+//     --botspecload S its CG_STARTRACE (a room reset during its load). So the
+//     server's side of a spectator - the seat, the hold, the catch-up, the
+//     racers' WATCHERS, the welcome - can be tried from one DuckStation.
+//   - with --botfinish N (1110): in a plain race, the first N racing bots
+//     cross the line one after another, BOT1 --botfinishat S seconds after
+//     the green (25 by default), each next 1.5 s later - their CG_ENDRACE as
+//     a client sends it, with ENDRACE_BOT if --botfinishbot - so a real
+//     player can finish 9th or later behind them (the bot driver's ranks past
+//     vanilla's 8).
+//   - with --botleave S (1110): a bot that has finished (--botfinish) or a
+//     spectator bot watching leaves S seconds on - the racers' WATCHERS goes
+//     down by one, a finished bot's kart is braked by its watchdog, and a
+//     spectator joining after that gets its finish with no ENDRACE_BOT.
+//   - removed (a kick, an idle clock), or gone with --botleave: back on the
+//     room list, connected again a few seconds later. (A kick keeps
+//     127.0.0.1 - every bot - out of that room for the kick ban's time.)
 // Driven from the server's own loop (Backfill_Tick, main).
 
 #define BACKFILL_MAX 16
@@ -83,6 +112,12 @@ typedef struct
 	enet_uint32 raceAt;     // when to say the race has loaded
 	enet_uint32 reconnectAt;
 
+	// --botkick: the name in the seat voted against, as SG_NAME gave it
+	// (CG_HOSTACTION carries it for the server's check), and when to cast
+	// the vote; 0 none due. Cleared with the lobby round (SG_NEWCLIENT).
+	char kickName[NAME_LEN];
+	enet_uint32 kickAt;
+
 	// The race (SG_STARTLOADING on, cleared with the round at SG_NEWCLIENT)
 	// and, in a mode room, its round: what this bot's ROM would report.
 	int room;               // the room it sits in, as the race loads (Bot_Room); -1 none
@@ -99,11 +134,35 @@ typedef struct
 	enet_uint32 lapAt;      // ELIMINATION: the next lap to report; 0 none due
 	enet_uint32 tagAt;      // TAG, while "it": when another bot reports this one's missile; 0 none due
 	int hurtSeq;            // its hurts' number (NET_HURT_SEQ, 1103), as a ROM counts its kart's
+
+	// A race in progress watched (1110). spectator: a --botspectate bot, for
+	// good - it joins only to watch; spectating: seated as a spectator now
+	// (SG_NEWCLIENT's NEWCLIENT_SPECTATOR), until the room's reset welcomes
+	// it as a player; watching: its catch-up came (the private
+	// SG_STARTRACE). nameAt: its CG_NAME due (--botspecname); finishAt: its
+	// CG_ENDRACE due in a plain race (--botfinish); leaveAt: when it leaves
+	// (--botleave). 0 none due.
+	int spectator;
+	int spectating;
+	int watching;
+	enet_uint32 nameAt;
+	enet_uint32 finishAt;
+	enet_uint32 leaveAt;
 } Bot;
 
 static Bot bots[BACKFILL_MAX];
 static int botCount = BACKFILL_PLAYERS;
 static int botPort;
+static int botKick = -1;   // --botkick: the seat (client ID) every bot votes to kick; -1 none
+static int botSpectate = 0;       // --botspectate: the last N bots join only to watch a race in progress (1110)
+static int botSpecNameSecs = 0;   // --botspecname: seconds a spectator bot holds its CG_NAME; 0 at once
+static int botSpecLoadSecs = 0;   // --botspecload: seconds a spectator bot "loads"; 0 as every bot, 3-5 s
+static int botFinish = 0;         // --botfinish: in a plain race, the first N racing bots cross the line
+static int botFinishAtSecs = 25;  // --botfinishat: the first of them that long after the green
+static int botFinishBot = 0;      // --botfinishbot: their CG_ENDRACE with ENDRACE_BOT
+static int botLeaveSecs = 0;      // --botleave: seconds after its finish or its catch-up a bot leaves; 0 never
+
+#define BOT_FINISH_GAP_MS 1500    // --botfinish: between one bot's finish and the next's
 
 static enet_uint32 Bot_Now(void)
 {
@@ -133,6 +192,7 @@ static void Bot_Connect(Bot* b)
 	b->inRoom = 0;
 	b->joinSent = 0;
 	b->reconnectAt = 0;
+	b->spectating = b->watching = 0;
 }
 
 // A race's state: none yet (a new race loading, or back in the lobby).
@@ -144,6 +204,7 @@ static void Bot_RaceReset(Bot* b)
 	b->placed = b->endSent = b->roundOver = b->isIt = 0;
 	b->lapsDone = b->lapMs = 0;
 	b->raceStart = b->hurtAt = b->lapAt = b->tagAt = 0;
+	b->finishAt = b->leaveAt = 0;
 }
 
 static void Bot_RoundReset(Bot* b)
@@ -152,7 +213,20 @@ static void Bot_RoundReset(Bot* b)
 	b->voted = 0;
 	b->trackIn = 0;
 	b->voteAt = b->charAt = b->pickAt = b->raceAt = 0;
+	b->kickAt = 0;
+	b->nameAt = 0;
+	memset(b->kickName, 0, sizeof(b->kickName));
 	Bot_RaceReset(b);
+}
+
+// Its name, as a client sends it at each SG_NEWCLIENT: BOT1... by its index.
+static void Bot_SendName(Bot* b, int index)
+{
+	struct CG_MessageName m;
+	memset(&m, 0, sizeof(m));
+	m.type = CG_NAME;
+	snprintf(m.name, sizeof(m.name), "BOT%d", index + 1);
+	Bot_Send(b, &m, sizeof(m));
 }
 
 // The room this bot sits in, from the server's own table (the bots live in
@@ -217,7 +291,10 @@ static void Bot_SendEvent(Bot* b, int kind, int owner, int serial, int arg)
 // entered the finished state (StatePC_Game_EndRace, CL_main.cpp): the race
 // clock in the game's units (960 a second), which runs from the green, and
 // a best lap - ELIMINATION's lap time once it has done one, else none.
-static void Bot_EndRace(Bot* b)
+// flags: CG_MessageEndRace's (1110): ENDRACE_BOT for a --botfinishbot
+// finish, as a client whose kart the bot driver took over says it; 0
+// otherwise.
+static void Bot_EndRace(Bot* b, int flags)
 {
 	struct CG_MessageEndRace m;
 	int ms;
@@ -232,6 +309,7 @@ static void Bot_EndRace(Bot* b)
 
 	memset(&m, 0, sizeof(m));
 	m.type = CG_ENDRACE;
+	m.padding = flags & 0xF;
 	m.courseTime = (int)((long long)ms * 960 / 1000);
 	m.lapTime = b->lapsDone ? (int)((long long)b->lapMs * 960 / 1000) : 0;
 	Bot_Send(b, &m, sizeof(m));
@@ -258,6 +336,31 @@ static void Bot_OnRooms(Bot* b, const struct SG_MessageRooms* r)
 	if (b->inRoom)
 		return;
 	b->joinSent = 0;   // a refused join comes back as a room list
+
+	// --botspectate (1110): only to watch - the fullest room whose race can
+	// be watched now, with JOIN_SPECTATE; never one to play in. A refusal
+	// (the race over meanwhile, the seat taken) is a room list, as ever.
+	if (b->spectator)
+	{
+		struct CG_MessageRoom m;
+		for (int k = 0; k < 16; k++)
+		{
+			if (counts[k] == 0 || ((r->spectateMask >> k) & 1) == 0)
+				continue;
+			if (best < 0 || counts[k] > counts[best])
+				best = k;
+		}
+		if (best < 0)
+			return;
+		memset(&m, 0, sizeof(m));
+		m.type = CG_JOINROOM;
+		m.flags = JOIN_SPECTATE;
+		m.room = (unsigned char)best;
+		m.version = SERVER_VERSION;
+		Bot_Send(b, &m, sizeof(m));
+		b->joinSent = 1;
+		return;
+	}
 
 	for (int k = 0; k < 16; k++)
 	{
@@ -293,25 +396,55 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 
 		case SG_NEWCLIENT:
 		{
-			// in the room (or the room back from a race): the name, a new round
+			// in the room (or the room back from a race): the name, a new round.
+			// Seated to watch (1110: NEWCLIENT_SPECTATOR, a --botspectate
+			// bot's JOIN_SPECTATE): its name maybe a while later
+			// (--botspecname), the race to load in the answer to it; the
+			// room's reset welcomes it as a player (special 0), and from
+			// there it is one as every bot is.
 			const struct SG_MessageClientStatus* r = (const struct SG_MessageClientStatus*)data;
-			struct CG_MessageName m;
 			b->inRoom = 1;
 			b->clientID = r->clientID;
 			b->isHost = 0;
+			b->spectating = (r->special & NEWCLIENT_SPECTATOR) != 0;
+			b->watching = 0;
 			Bot_RoundReset(b);
-			memset(&m, 0, sizeof(m));
-			m.type = CG_NAME;
-			snprintf(m.name, sizeof(m.name), "BOT%d", index + 1);
-			Bot_Send(b, &m, sizeof(m));
+			if (b->spectating)
+			{
+				int rn = Bot_Room(b);
+				PrintPrefix(rn >= 0 ? rn + 1 : -1);
+				printf("BOT%d (%d) seated as a spectator%s\n", index + 1, b->clientID,
+					botSpecNameSecs > 0 ? ", its name held (--botspecname)" : "");
+			}
+			if (b->spectating && botSpecNameSecs > 0)
+				b->nameAt = Bot_Now() + (enet_uint32)botSpecNameSecs * 1000;
+			else
+				Bot_SendName(b, index);
+			break;
+		}
+
+		case SG_NAME:
+		{
+			// --botkick: the seat voted against named - a newcomer in it, or
+			// its player's name again with the next lobby round - and the
+			// vote cast a few seconds on; emptied (its player gone), none.
+			// Never against itself (the server refuses that).
+			const struct SG_MessageName* r = (const struct SG_MessageName*)data;
+			if (botKick < 0 || size < sizeof(struct SG_MessageName) ||
+				r->clientID != botKick || r->clientID == b->clientID)
+				break;
+			memcpy(b->kickName, r->name, NAME_LEN);
+			b->kickAt = r->name[0] ? Bot_In(2000, 8000) : 0;
 			break;
 		}
 
 		case SG_HOST:
 		{
+			// (a spectator picks nothing, 1110: it is in no lobby until the
+			// reset - the server drops a pick from it anyway)
 			const struct SG_MessageHost* r = (const struct SG_MessageHost*)data;
 			b->isHost = (r->hostID == b->clientID);
-			if (b->isHost && !b->voteEnabled && !b->trackIn && b->pickAt == 0)
+			if (b->isHost && !b->spectating && !b->voteEnabled && !b->trackIn && b->pickAt == 0)
 				b->pickAt = Bot_In(3000, 8000);
 			break;
 		}
@@ -319,6 +452,14 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 		case SG_VOTE:
 		{
 			const struct SG_MessageVote* r = (const struct SG_MessageVote*)data;
+
+			// The answer to this bot's own vote to kick (--botkick, 1110;
+			// SG_MessageKickVote): nothing of the room's vote is in it - its
+			// phase is no vote's, and the bit enabled sits in is its result's
+			// - so none of it is taken.
+			if (r->phase == VOTE_KICK_REPLY)
+				break;
+
 			b->voteEnabled = r->enabled;
 			if (r->phase != b->votePhase)
 			{
@@ -327,19 +468,21 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 				if (r->phase == VOTE_NONE)
 					b->voted = 0;
 				b->votePhase = r->phase;
-				b->voteAt = (r->phase != VOTE_NONE && b->voted != r->phase) ? Bot_In(1000, 6000) : 0;
+				b->voteAt = (r->phase != VOTE_NONE && b->voted != r->phase && !b->spectating) ? Bot_In(1000, 6000) : 0;
 			}
-			if (b->isHost && !b->voteEnabled && r->phase == VOTE_NONE && !b->trackIn && b->pickAt == 0)
+			if (b->isHost && !b->spectating && !b->voteEnabled && r->phase == VOTE_NONE && !b->trackIn && b->pickAt == 0)
 				b->pickAt = Bot_In(3000, 8000);
 			break;
 		}
 
 		case SG_TRACK:
+			// (a spectator's, at its seat: the race's track, no character to
+			// pick - 1110)
 			b->trackIn = 1;
 			b->votePhase = VOTE_NONE;
 			b->voted = 0;   // the vote over (as an SG_VOTE of phase NONE says)
 			b->voteAt = b->pickAt = 0;
-			b->charAt = Bot_In(2000, 10000);
+			b->charAt = b->spectating ? 0 : Bot_In(2000, 10000);
 			break;
 
 		case SG_TRACKCANCEL:
@@ -355,15 +498,21 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 			// ROUND_CODE_*): heeded in a mode room only, as the client does
 			// (an older server leaves the nibble uninitialised); 0 a plain
 			// race; for ELIMINATION the laps.
+			// A spectator's (1110: the answer to its CG_NAME) is the same,
+			// but it plays no round - it has no kart - and "loads" for
+			// --botspecload seconds if given.
 			int code = ((const struct SG_Header*)data)->padding;
 			Bot_RaceReset(b);
 			b->room = Bot_Room(b);
-			if (b->room >= 0 && ROOM_IS_MODE(b->room) && code != 0)
+			if (b->room >= 0 && ROOM_IS_MODE(b->room) && code != 0 && !b->spectating)
 			{
 				b->roundRow = ROOM_ROW(b->room);
 				b->roundLaps = (code < ROUND_CODE_VOTED) ? code : 0;
 			}
-			b->raceAt = Bot_In(3000, 5000);
+			if (b->spectating && botSpecLoadSecs > 0)
+				b->raceAt = Bot_Now() + (enet_uint32)botSpecLoadSecs * 1000;
+			else
+				b->raceAt = Bot_In(3000, 5000);
 			break;
 		}
 
@@ -371,6 +520,26 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 			// the lights: the green BOT_LIGHTS_MS on. A round's first reports
 			// are planned from here (the referee judges from the green).
 			b->raceStart = Bot_Now();
+
+			// A spectator's (1110): its catch-up's last word - watching now,
+			// reporting nothing, and gone --botleave seconds on if given.
+			if (b->spectating)
+			{
+				b->watching = 1;
+				if (botLeaveSecs > 0)
+					b->leaveAt = b->raceStart + (enet_uint32)botLeaveSecs * 1000;
+				PrintPrefix(b->room >= 0 ? b->room + 1 : -1);
+				printf("BOT%d (%d) caught up and watching\n", index + 1, b->clientID);
+				break;
+			}
+
+			// --botfinish (1110): in a plain race, the first N racing bots
+			// across the line in their order, from --botfinishat seconds
+			// after the green
+			if (b->roundRow == 0 && index < botFinish)
+				b->finishAt = b->raceStart + BOT_LIGHTS_MS + (enet_uint32)botFinishAtSecs * 1000 +
+					(enet_uint32)index * BOT_FINISH_GAP_MS;
+
 			if (b->roundRow == ROOM_ROW_POTION_GAME)
 				b->hurtAt = Bot_In(10000, 40000);
 			else if (b->roundRow == ROOM_ROW_BOMBARDMENT)
@@ -392,6 +561,10 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 			if (size < sizeof(struct SG_MessageWeaponEvent))
 				break;
 
+			// (a spectator has no kart: none of it is about it, 1110)
+			if (b->spectating)
+				break;
+
 			if (r->kind == NET_EV_OUT)
 			{
 				// placed - out, finished or still in at the end, any of
@@ -402,7 +575,7 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 					b->placed = 1;
 					b->isIt = 0;
 					b->hurtAt = b->lapAt = b->tagAt = 0;
-					Bot_EndRace(b);
+					Bot_EndRace(b, 0);
 				}
 				if (r->serial & ROUND_LAST)
 					b->roundOver = 1;
@@ -500,10 +673,10 @@ static void Bot_RoundTick(Bot* b, int index, enet_uint32 now)
 		b->lapsDone++;
 		last = (b->roundLaps > 0 && b->lapsDone >= b->roundLaps);
 		if (last && rand() % 2)
-			Bot_EndRace(b);
+			Bot_EndRace(b, 0);
 		Bot_SendEvent(b, NET_EV_LAP, 0, 0, b->lapsDone);
 		if (last)
-			Bot_EndRace(b);
+			Bot_EndRace(b, 0);
 
 		PrintPrefix(b->room + 1);
 		printf("BOT%d (%d) reports lap %d%s\n", index + 1, b->clientID, b->lapsDone,
@@ -594,6 +767,7 @@ static void Backfill_Tick(void)
 					// removed: on the room list again, connected anew shortly
 					b->connected = 0;
 					b->inRoom = 0;
+					b->spectating = b->watching = 0;
 					b->peer = 0;
 					b->reconnectAt = Bot_In(3000, 6000);
 					break;
@@ -660,6 +834,57 @@ static void Backfill_Tick(void)
 			Bot_Send(b, &m, sizeof(m));
 		}
 
+		// --botkick: its vote against that seat, as a ROM's VOTE TO KICK
+		// has its client send it (HostAction_Service, CL_main.cpp)
+		if (b->kickAt && (int)(now - b->kickAt) >= 0)
+		{
+			struct CG_MessageHostAction m;
+			b->kickAt = 0;
+			memset(&m, 0, sizeof(m));
+			m.type = CG_HOSTACTION;
+			m.action = HOST_ACTION_KICKVOTE;
+			m.clientID = (unsigned char)botKick;
+			memcpy(m.name, b->kickName, NAME_LEN);
+			Bot_Send(b, &m, sizeof(m));
+		}
+
+		// --botspecname (1110): a spectator's name, held till now
+		if (b->nameAt && (int)(now - b->nameAt) >= 0)
+		{
+			b->nameAt = 0;
+			Bot_SendName(b, i);
+		}
+
+		// --botfinish (1110): across the line, as a client says it - with
+		// ENDRACE_BOT for --botfinishbot - and, with --botleave, gone a
+		// while on
+		if (b->finishAt && (int)(now - b->finishAt) >= 0)
+		{
+			b->finishAt = 0;
+			if (!b->endSent)
+			{
+				Bot_EndRace(b, botFinishBot ? ENDRACE_BOT : 0);
+				PrintPrefix(b->room >= 0 ? b->room + 1 : -1);
+				printf("BOT%d (%d) crosses the line (--botfinish)%s\n", i + 1, b->clientID,
+					botFinishBot ? ", its kart driven on by the bot (ENDRACE_BOT)" : "");
+				if (botLeaveSecs > 0)
+					b->leaveAt = now + (enet_uint32)botLeaveSecs * 1000;
+			}
+		}
+
+		// --botleave (1110): gone, as a player closing the game - finished,
+		// or watching. Nothing more from it; its DISCONNECT puts it back on
+		// the room list (above).
+		if (b->leaveAt && (int)(now - b->leaveAt) >= 0)
+		{
+			b->leaveAt = 0;
+			PrintPrefix(b->room >= 0 ? b->room + 1 : -1);
+			printf("BOT%d (%d) leaves (--botleave)\n", i + 1, b->clientID);
+			enet_peer_disconnect(b->peer, 0);
+			b->inRoom = 0;
+			continue;
+		}
+
 		// a game mode's round: what its ROM would report
 		Bot_RoundTick(b, i, now);
 	}
@@ -670,10 +895,14 @@ static void Backfill_Init(int port)
 {
 	if (botCount > BACKFILL_MAX) botCount = BACKFILL_MAX;
 	if (botCount < 0) botCount = 0;
+	if (botSpectate > botCount) botSpectate = botCount;
 	botPort = port;
 
 	for (int i = 0; i < botCount; i++)
 	{
+		// --botspectate (1110): the last N, for good
+		bots[i].spectator = (i >= botCount - botSpectate);
+
 		bots[i].host = enet_host_create(NULL, 1, 2, 0, 0);
 		if (bots[i].host == 0)
 		{
@@ -685,4 +914,16 @@ static void Backfill_Init(int port)
 
 	PrintPrefix(-1);
 	printf("DEBUG BUILD: %d bots (BOT1-BOT%d) join the first room a player is in\n", botCount, botCount);
+	if (botSpectate > 0)
+	{
+		PrintPrefix(-1);
+		printf("DEBUG BUILD: BOT%d-BOT%d join only to watch a race in progress (--botspectate)\n",
+			botCount - botSpectate + 1, botCount);
+	}
+	if (botFinish > 0)
+	{
+		PrintPrefix(-1);
+		printf("DEBUG BUILD: in plain races BOT1-BOT%d cross the line from %ds after the green (--botfinish)%s\n",
+			botFinish, botFinishAtSecs, botFinishBot ? ", with ENDRACE_BOT" : "");
+	}
 }

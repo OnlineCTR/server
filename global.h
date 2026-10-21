@@ -25,11 +25,11 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1109
-#define SERVER_VERSION 1109
+#define VERSION 1110
+#define SERVER_VERSION 1110
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
-// defined before it includes this header; 1109). One from another release
+// defined before it includes this header; 1110). One from another release
 // than this header must not build: it would relay messages of a size and
 // meaning this header no longer gives them (an 1103 relay of 1104's kart
 // message sends no lap word, and every kart's place goes wrong).
@@ -56,8 +56,11 @@
 // (1109): a shield's bump claimed the same way, mask or not (the server
 // takes one a shield fired), and a shield's bump told as its own hurt
 // reason (NET_HURT_SHIELD_BUMP), for every machine to pop the bumper's
-// shield too.
-#define NET_WEAPON_EVENTS 9
+// shield too. 10 (1110): a squish (NET_CLAIM_HIT(3, 5)) claimed the same
+// way, mask or not (the server takes one from a player whose kart it saw
+// with Saffi, FLAME_SAFFI, or who fired a TURBO lately), and Saffi's blue
+// sent apart from TAG YOU'RE IT's "it" Saffi (FLAME_SAFFI).
+#define NET_WEAPON_EVENTS 10
 
 // The game modes of room rows 2-5 (POTION GAME, BOMBARDMENT, ELIMINATION,
 // TAG YOU'RE IT): the server referees every knockout from the karts' own
@@ -67,11 +70,13 @@
 // (BOMB_LIVES, NET_EV_LIVES, octr->roundHits).
 #define NET_ROUND_MODES 2
 
-// The host's OPTIONS in the lobby (hostOptions.c): CG_HOSTACTION, the host
-// handing the room to another player or kicking one, DISCONNECT_REASON_KICKED
-// and the server's kick ban. SV_main.c checks for this to catch a stale
-// global.h.
-#define NET_HOST_ACTIONS 1
+// The lobby's OPTIONS (hostOptions.c): CG_HOSTACTION, the host handing the
+// room to another player, DISCONNECT_REASON_KICKED and the server's kick
+// ban. SV_main.c checks for this to catch a stale global.h. 2 (1110):
+// VOTE TO KICK - HOST_ACTION_KICKVOTE / KICKUNVOTE from any player, the
+// room's secret count against KICK_VOTES_BY_PLAYERS, answered by SG_VOTE's
+// VOTE_KICK_REPLY to the voter alone; the host's instant KICK PLAYER gone.
+#define NET_HOST_ACTIONS 2
 
 // The players' vote for the track and then the laps (vote.c, SV_main.c's
 // Vote_*): SG_VOTE (in the old SG_SERVERCLOSED's place), CG_VOTE, and the
@@ -84,6 +89,23 @@
 // their own screens' laps and progress, and finishes them when the server
 // says so (netLap.c). SV_main.c checks for this to catch a stale global.h.
 #define NET_KART_LAPS 1
+
+// A race in progress watched, and the bot driver past the finish line
+// (1110). A room racing past its green, not over, with a seat that was
+// empty at its load can be watched (SG_MessageRooms.spectateMask,
+// octr->clientCount's ROOM_SPECTATE): a join with JOIN_SPECTATE
+// (CG_MessageRoom.flags) takes that seat as a spectator
+// (SG_MessageClientStatus.special's NEWCLIENT_SPECTATOR), kept out of the
+// race, its rules and the lobby's counts, and caught up once its race has
+// loaded (the server's Spectator_*; the ROM's spectate.c,
+// OCTR_SPECIAL_SPECTATOR). The racers are told how many watch
+// (SG_MessageLobbyCountdown's LOBBYCOUNT_WATCHERS, octr->watchers: WATCHERS
+// on their HUD). A player over the line is handed to the bot driver as in
+// the game, and their kart drives on: their CG_ENDRACE says so
+// (ENDRACE_BOT), the server's SG_ENDRACE passes it on, and the other
+// machines hold no brake on that copy (octr->copyParked). SV_main.c checks
+// for this to catch a stale global.h.
+#define NET_SPECTATE 1
 
 // A vote: VOTE_NONE (the host picks, or no pick due), VOTE_TRACK, VOTE_LAPS.
 // Each runs VOTE_SECONDS, or until every player has voted (the server's
@@ -264,10 +286,18 @@
 // octr->clientCount[room], as the client hands the room list (SG_ROOMS) to
 // the ROM: the players in it (0 to MAX_NUM_PLAYERS) plus ROOM_CLOSED when the
 // server lets nobody in now (RoomOpenForJoin, SV_main.c). A full room is not
-// joinable either. Up to 8 players "closed" was +8 on the count.
+// joinable either. Up to 8 players "closed" was +8 on the count. And
+// ROOM_SPECTATE (1110), the char's last bit, unused before: the race in it
+// can be watched now - past its green, not over, with a seat that was empty
+// at its load (RoomOpenForSpectate, SV_main.c; SG_MessageRooms.spectateMask)
+// - which the room list offers as MATCH IN PROGRESS, SPECTATE on a row that
+// cannot be joined (hostOptions.c). Every reader of the count masks it out
+// (ROOM_PLAYERS, ROOM_JOINABLE).
 #define ROOM_CLOSED      0x40
+#define ROOM_SPECTATE    0x80
 #define ROOM_PLAYERS(c)  ((c) & 0x3F)
 #define ROOM_JOINABLE(c) ((((c) & ROOM_CLOSED) == 0) && (ROOM_PLAYERS(c) < MAX_NUM_PLAYERS))
+#define ROOM_SPECTATABLE(c) (((c) & ROOM_SPECTATE) != 0)
 // a number in a string literal ("/" OCTR_STR(MAX_NUM_PLAYERS))
 #define OCTR_STR2(x) #x
 #define OCTR_STR(x)  OCTR_STR2(x)
@@ -352,7 +382,7 @@ enum ClientState
 #define NET_EV_OUT        11  // server -> clients only: a player placed - clientID the player (0xF none: a round's end alone, with ROUND_LAST; or, no cause and not last, the "round off" marker: under 2 players at the green, a plain race), owner the attacker (0xF none), serial ROUND_CAUSE_* | ROUND_LAST, arg the place (0xF none)
 #define NET_EV_IT         12  // server -> clients only (TAG): clientID who is it (0xF none), owner the tagger (0xF none), serial bit 0 the clock running, arg its seconds left
 #define NET_EV_LIVES      13  // server -> clients only (BOMBARDMENT): clientID lost a life and is still in, owner the attacker (0xF none), arg the lives left (1 to BOMB_LIVES - 1); the last life's loss is NET_EV_OUT
-#define NET_EV_KART_CLAIM 14  // 1107: the sender's masked kart bumped another player's on the sender's screen - or, 1109, its shield did, mask or not; no weapon, the identity's shooter field is the bumped kart's client ID and its count the hit VehPhysCrash_Attack gave it there (NET_CLAIM_HIT: the mask's, type 2 reason 6; the sender's own shield bumped off on it, 2 and 0; a masked kart's turbo squish, 3 and 5). The server sends it to that player alone, arg the two players' round trips added, in 4 ms (ROM -> server: 0); that kart's machine judges it (NetKart_ClaimApply, netWeapons.c) and hurts its kart as the game would, which goes out as its NET_EV_KART_HURT
+#define NET_EV_KART_CLAIM 14  // 1107: the sender's masked kart bumped another player's on the sender's screen - or, 1109, its shield did, mask or not, or, 1110, it squished it (VehPhysCrash_Attack's squish: Saffi or the TURBO item's fire), mask or not; no weapon, the identity's shooter field is the bumped kart's client ID and its count the hit VehPhysCrash_Attack gave it there (NET_CLAIM_HIT: the mask's, type 2 reason 6; the sender's own shield bumped off on it, 2 and 0; a squish, 3 and 5: 1110, mask or not, by a kart with Saffi or the TURBO item's fire). The server sends it to that player alone, arg the two players' round trips added, in 4 ms (ROM -> server: 0); that kart's machine judges it (NetKart_ClaimApply, netWeapons.c) and hurts its kart as the game would, which goes out as its NET_EV_KART_HURT
 #define NET_EV_COUNT      15
 #define NET_CLAIM_HIT(type, reason) ((type) | ((reason) << 3))   // NET_EV_KART_CLAIM's count
 // the kinds only the server sends: refused from a client
@@ -459,6 +489,12 @@ struct OnlineCTR
 	// 0x14
 	unsigned char boolPlanetLEV;
 	unsigned char boolClientBusy;
+
+	// OCTR_SPECIAL_SPECTATOR (1110) while this machine watches a race it
+	// joined in progress: the client's, from a spectator's SG_NEWCLIENT
+	// (NEWCLIENT_SPECTATOR), 0 again at the room reset's ordinary one. The
+	// ROM's spectate.c parks and hides its own kart while it is set. Was the
+	// weekday events' byte, which no server sends.
 	unsigned char special;
 
 	// Which client ID currently owns the lobby (track/lap picking).
@@ -503,6 +539,31 @@ struct OnlineCTR
 
     // Last windowsClientSync counter
 	char lastWindowsClientSync;
+
+	// 0x169 (1110), in what was the alignment gap up to readyToSend: the
+	// spectators watching this race - players who joined it in progress,
+	// caught up (spectate.c on their machines) - 0 to MAX_NUM_PLAYERS, from
+	// the server's SG_LOBBYCOUNTDOWN with LOBBYCOUNT_WATCHERS, sent as one
+	// starts watching and as one leaves. Written by the client only;
+	// cleared at SG_NEWCLIENT, SG_STARTLOADING and a drop, not with the
+	// round (Round_Clear also runs at the green). The ROM reads it for the
+	// racers' WATCHERS on the HUD (playerCount.c), shown while it is 1 or
+	// more.
+	unsigned char watchers;
+
+	// 0x16A (1110), the same gap: the other players' karts this machine's
+	// client holds braked, SQUARE on their controllers - bit n for KART SLOT
+	// n (1 to MAX_NUM_PLAYERS - 1): one over the line whose CG_ENDRACE had no
+	// ENDRACE_BOT (not handed to the bot driver: a round's out, END or TAG
+	// kart, a track with no nav path), a finished player's bot whose kart
+	// messages stopped (the client's watchdog, a second without one: its
+	// player left or crashed), or a player who left. The client's
+	// g_slotEnded | g_botStalled, written by the client only, in one 16-bit
+	// store each time either changes; 0 with the round (Round_Clear). The ROM
+	// reads it (Net_Parked, netWeapons.c): a copy over the line without its
+	// bit is driven on by its player's bot - also one over the line on this
+	// screen before its SG_ENDRACE came - and is a target as a racer is.
+	unsigned short copyParked;
 
 	// when to start the client.exe loop
 	int readyToSend;
@@ -593,14 +654,15 @@ struct OnlineCTR
 	// private room, Beta). Written by the client every loop.
 	int serverPlayers[8];
 
-	// The host's OPTIONS (hostOptions.c): CHANGE HOST or KICK PLAYER at
-	// another player of the room, HOST_ACTION_* | (that player's client ID
-	// << 8), written by the ROM and taken by the client (HostAction_Service,
-	// CL_main.cpp), which sends CG_HOSTACTION. 0 for none.
+	// The lobby's OPTIONS (hostOptions.c): the host's CHANGE HOST, anybody's
+	// VOTE TO KICK (cast or taken back) at another player of the room,
+	// HOST_ACTION_* | (that player's client ID << 8), written by the ROM and
+	// taken by the client (HostAction_Service, CL_main.cpp), which sends
+	// CG_HOSTACTION. 0 for none.
 	int hostAction;
 
 	// From the client when the server removed this player from their room:
-	// KICKED_NOTICE_HOST, the host's KICK PLAYER (DISCONNECT_REASON_KICKED) -
+	// KICKED_NOTICE_VOTE, the room's vote to kick (DISCONNECT_REASON_KICKED) -
 	// the ROM picks the same server straight back, as TRIANGLE out of a
 	// room does (thread.c), and says why on its room list - or
 	// KICKED_NOTICE_IDLE, the idle clock (DISCONNECT_REASON_IDLE) - said on
@@ -664,7 +726,16 @@ struct OnlineCTR
 	// the other karts', two bits each by KART SLOT (FLAME_BY), written by the
 	// client alone from SG_RACEDATA's (cleared with the round, Round_Clear).
 	unsigned char flameOwn;
-	unsigned char flamePad[2];
+
+	// This player's own votes to kick (1110), bit n for client ID n, as the
+	// server last answered (SG_VOTE's VOTE_KICK_REPLY: SG_MessageKickVote's
+	// mine) - nobody else's are ever sent. Written by the client only, in one
+	// 16-bit store; cleared as a room is joined, at SG_STARTLOADING (the
+	// server wipes every vote at the countdown), a seat changing hands and a
+	// drop. The ROM reads it (hostOptions.c: the pick's VOTE / REMOVE VOTE,
+	// the voted names in red).
+	unsigned short kickVotes;
+
 	unsigned int flameBy;
 
 	// This machine's kart's last hurt, for the client to send in every kart
@@ -685,6 +756,12 @@ STATIC_ASSERT2(sizeof(struct OnlineCTR) <= 0x400, "Size of OnlineCTR must be lte
 #include <stddef.h>
 #define OCTR_OFFSETOF(m) offsetof(struct OnlineCTR, m)
 #endif
+// the alignment gap's two fields (1110), between a char and an int
+STATIC_ASSERT2(OCTR_OFFSETOF(lastWindowsClientSync) == 0x168, "OnlineCTR layout: lastWindowsClientSync");
+STATIC_ASSERT2(OCTR_OFFSETOF(watchers) == 0x169, "OnlineCTR layout: watchers");
+STATIC_ASSERT2(OCTR_OFFSETOF(copyParked) == 0x16A, "OnlineCTR layout: copyParked");
+STATIC_ASSERT2(OCTR_OFFSETOF(readyToSend) == 0x16C, "OnlineCTR layout: readyToSend");
+STATIC_ASSERT2(MAX_NUM_PLAYERS <= 16, "copyParked: a 16-bit mask by kart slot");
 STATIC_ASSERT2(OCTR_OFFSETOF(playersOnline) == 0x190, "OnlineCTR layout: playersOnline");
 STATIC_ASSERT2(OCTR_OFFSETOF(ShotPose) == 0x194, "OnlineCTR layout: ShotPose");
 STATIC_ASSERT2(OCTR_OFFSETOF(evOut) == 0x254, "OnlineCTR layout: evOut");
@@ -702,6 +779,7 @@ STATIC_ASSERT2(OCTR_OFFSETOF(roundIt) == 0x3E4, "OnlineCTR layout: roundIt");
 STATIC_ASSERT2(OCTR_OFFSETOF(roundHits) == 0x3E8, "OnlineCTR layout: roundHits");
 STATIC_ASSERT2(OCTR_OFFSETOF(tagFire) == 0x3F4, "OnlineCTR layout: tagFire");
 STATIC_ASSERT2(OCTR_OFFSETOF(flameOwn) == 0x3F5, "OnlineCTR layout: flameOwn");
+STATIC_ASSERT2(OCTR_OFFSETOF(kickVotes) == 0x3F6, "OnlineCTR layout: kickVotes");
 STATIC_ASSERT2(OCTR_OFFSETOF(flameBy) == 0x3F8, "OnlineCTR layout: flameBy");
 STATIC_ASSERT2(OCTR_OFFSETOF(hurtOwn) == 0x3FC, "OnlineCTR layout: hurtOwn");
 STATIC_ASSERT2(sizeof(struct OnlineCTR) == 0x400, "OnlineCTR layout: size");
@@ -788,19 +866,32 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define BACK_CANCEL_CONNECT 4 // the private room's address prompt: the client takes it down (and drops a connection it had begun); back to the server list
 
 // octr->kickedNotice
-#define KICKED_NOTICE_HOST 1   // KICKED BY THE HOST, on the room list it rejoins
+#define KICKED_NOTICE_VOTE 1   // KICKED BY VOTE, on the room list it rejoins (KICKED_NOTICE_HOST, the host's KICK PLAYER, up to 1109)
 #define KICKED_NOTICE_IDLE 2   // KICKED FOR IDLING, on the server list
 
-// octr->hostAction and CG_MessageHostAction.action: the host's OPTIONS
+// octr->special (1110)
+#define OCTR_SPECIAL_SPECTATOR 1   // watching a race joined in progress (NEWCLIENT_SPECTATOR): the own kart parked off the track, hidden and finished, the camera on the racers (spectate.c)
+
+// octr->hostAction and CG_MessageHostAction.action: the lobby's OPTIONS
 #define HOST_ACTION_NONE 0
-#define HOST_ACTION_GIVE 1   // CHANGE HOST: the room is that player's to run
-#define HOST_ACTION_KICK 2   // KICK PLAYER: that player is removed, and kept out of the room for a while (KICK_BAN_SECONDS, SV_main.c)
-// How long: the server keeps the kicked address out of that room this long
+#define HOST_ACTION_GIVE 1   // CHANGE HOST (the host's): the room is that player's to run
+// 2: KICK PLAYER, the host's instant kick (1101-1109) - gone in 1110 for the
+// room's vote; never sent, and the server refuses it
+// A player the room votes out is kept out of it for a while. How long: the
+// server keeps the kicked address out of that room this long
 // (SV_main.c KickBan_*), and the client takes the site's count for that
 // server as long (its status answers leave the room out: ServerLive_Kicked,
 // CL_main.cpp). The server's --kickban changes its own only, for tests.
 #define KICK_BAN_SECONDS 300
 #define HOST_ACTION_VOTING 3 // PLAYER VOTING: on (the target byte 1) or off (0) for the room - its players vote the track and laps, or the host picks
+#define HOST_ACTION_KICKVOTE 4    // VOTE TO KICK (anybody, 1110): this player's vote against that one
+#define HOST_ACTION_KICKUNVOTE 5  // ...taken back (the same player picked again)
+// The votes a kick needs by the players in the room (0 to MAX_NUM_PLAYERS,
+// the one voted against among them; nobody votes against themselves): 0,
+// no vote to kick - in a room of one or two players (Matt, 1110: VOTE TO
+// KICK only from three players on, greyed below that).
+#define KICK_VOTES_BY_PLAYERS 0, 0, 0, 2, 3, 3, 4, 5, 6, 7, 8, 9, 10
+STATIC_ASSERT2(MAX_NUM_PLAYERS <= 16, "kick votes: a 16-bit mask a voter");
 
 // Sizes checkpointTimes (Mods7.c): must cover the largest entry in
 // LAP_COUNT_BY_ID, or the split tracker writes past the array from lap 8.
@@ -858,11 +949,17 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define NET_HURT_SEQ(count) (((count) >> 1) & 15)
 
 // A kart's flame colour on the wire (CG/SG_RACEDATA's flame, octr->flameOwn
-// and flameBy; saffiFlame.c): the game's orange, Saffi's blue (wrapped
-// reserves, or TAG YOU'RE IT's "it" Saffi), Ultra Sacred Fire's green
+// and flameBy; saffiFlame.c): the game's orange, Saffi's blue, Ultra Sacred
+// Fire's green. Two blues, drawn the same (bit 0 set): FLAME_SAFFI for
+// Saffi itself, wrapped reserves, whose kart squishes every kart it rams
+// (1110: actionsFlagSet 0x200, SaffiFlame_Step), and FLAME_BLUE for TAG
+// YOU'RE IT's "it" Saffi (TRIANGLE, octr->tagFire), which squishes nobody -
+// the others' screens tell the two apart by this alone (a copy's reserves
+// are 200 under both).
 #define FLAME_GAME    0
 #define FLAME_BLUE    1
 #define FLAME_GREEN   2
+#define FLAME_SAFFI   3
 #define FLAME_BY(slot) ((octr->flameBy >> (2 * (slot))) & 3)
 #define TAG_SECONDS   60
 #define TAG_LAPS      127   // numLaps is a signed char: endless enough (a round lasts at most players x TAG_SECONDS)
@@ -962,6 +1059,29 @@ extern int currCam;
 int Spectate_IsRacing(int driverID);
 int Spectate_NextRacer();
 
+// The spectator who joined a race in progress (spectate.c, 1110), each race
+// step after NetWeapons_Step (Online_RemoteEngines, engineAudio.c): while
+// octr->special is OCTR_SPECIAL_SPECTATOR, this machine's own kart parked
+// off the track, hidden and finished without the bot, the fly-in skipped,
+// and the spectating above handed the camera.
+void Spectator_Step(void);
+
+// This machine's kart driven on by the bot past its line (botFinish.c,
+// 1110; BOTS_Driver_Convert, drivers[0] alone online). BotNet_Gate, from
+// the top of BOTS_ChangeState (the exe, which has no room for global.h and
+// declares it itself): a hurt on it sent to the other machines as
+// NetKart_Gate sends a racer's - 0 refuse it, 2 go on as the game.
+// BotNet_Carry, from BOTS_Driver_Convert, last: what the kart brings over
+// the line - Saffi's reserves, ended before the bot's first tick; the hurt
+// it crossed the line in, which went out as it took, handed to the bot
+// unsent; a hit deferred in the crossing step, taken and sent the bot's way.
+// BotFinish_Step, each race step before NetWeapons_Step (engineAudio.c): the
+// invincibility and invisibility a bot's kart keeps, which only the player's
+// physics count down.
+int BotNet_Gate(struct Driver* v, int type, struct Driver* attacker, int reason);
+void BotNet_Carry(struct Driver* d);
+void BotFinish_Step(void);
+
 #ifdef WINDOWS_INCLUDE
 
 #include <time.h>
@@ -1033,7 +1153,7 @@ enum ServerGiveMessageType
 // enet_peer_disconnect() data from the server, so the client can say why
 // it was dropped (0 is the plain disconnect everything else uses).
 #define DISCONNECT_REASON_IDLE 1
-#define DISCONNECT_REASON_KICKED 2   // the host's KICK PLAYER (CG_HOSTACTION)
+#define DISCONNECT_REASON_KICKED 2   // the room's vote to kick (CG_HOSTACTION's KICKVOTE; the host's KICK PLAYER up to 1109)
 
 // variety of opcodes (start load / start race)
 struct SG_Header
@@ -1073,6 +1193,23 @@ struct SG_MessageVote
 	unsigned char votes[MAX_NUM_PLAYERS];
 };
 
+// SG_VOTE with phase VOTE_KICK_REPLY (1110): the server's answer to one
+// player's VOTE TO KICK, to that player alone - the room never hears of a
+// vote, only of the kick when the count is reached (the empty SG_NAME of a
+// disconnect). Never a room's votePhase.
+#define VOTE_KICK_REPLY  3
+#define KICKVOTE_CAST    1
+#define KICKVOTE_REMOVED 2
+#define KICKVOTE_REFUSED 3   // the target gone, voting closed (the countdown), a room too small
+struct SG_MessageKickVote
+{
+	unsigned char type : 4;     // SG_VOTE
+	unsigned char phase : 2;    // VOTE_KICK_REPLY
+	unsigned char result : 2;   // KICKVOTE_*
+	unsigned char target;       // the client ID voted on
+	unsigned short mine;        // this player's votes now, bit n for client ID n (octr->kickVotes)
+};
+
 struct SG_MessageRooms
 {
 	// 15 types, 15 bytes max
@@ -1107,7 +1244,15 @@ struct SG_MessageRooms
 	// are 0 to MAX_NUM_PLAYERS; up to 8 players "closed" was +8 on them.
 	unsigned short closedMask;
 
-	// 14 bytes total
+	// bit N: the race in room N+1 can be watched now (1110,
+	// RoomOpenForSpectate: past its green, not over, a seat that was empty at
+	// its load, not near the forced return to the lobby), less the rooms this
+	// player was voted out of a short while ago - octr->clientCount's
+	// ROOM_SPECTATE. Read only once the version above has passed: a server
+	// from another release sends a list 14 bytes long.
+	unsigned short spectateMask;
+
+	// 16 bytes total
 };
 
 // sent to each user when someone connects
@@ -1122,9 +1267,16 @@ struct SG_MessageClientStatus
 	// 1-15
 	unsigned char numClientsTotal : 4;
 
-	// special event
+	// special event: NEWCLIENT_SPECTATOR (1110), the seat is a spectator's -
+	// a race in progress joined to watch (CG_MessageRoom's JOIN_SPECTATE),
+	// whose player is kept out of it and out of the lobby's counts until the
+	// room's reset welcomes them again with 0 (octr->special). The weekday
+	// events of 1-3 are never sent.
 	unsigned char special : 4;
 };
+
+// SG_MessageClientStatus.special's bit 3 (1110)
+#define NEWCLIENT_SPECTATOR 8
 
 // get name from any client
 struct SG_MessageName
@@ -1266,31 +1418,53 @@ struct SG_MessageWeaponEvent
 	unsigned char arg;
 };
 
+// CG_MessageEndRace's bit 0 and SG_MessageEndRace.flags (1110): the
+// player's kart drives on as the bot past the line (BOTS_Driver_Convert,
+// actionsFlagSet 0x100000), and its kart messages go on, with buttons the
+// client makes up for it (StatePC_Game_EndRace) - the others hold no SQUARE
+// on that copy, which stays a target as a racer is (octr->copyParked).
+#define ENDRACE_BOT 1
+
 struct SG_MessageEndRace
 {
 	// 15 types, 15 bytes max
 	unsigned char type : 4;
 	unsigned char clientID : 4;
+
+	// ENDRACE_BOT (1110) as the finisher's CG_ENDRACE said it - or 0, in a
+	// spectator's catch-up, for a finisher who has left since (their copy
+	// braked at once). Was the int's alignment gap: the size stays 12.
+	unsigned char flags;
+
 	int courseTime;
 	int lapTime;
 };
 
 // Sent at the first and at the last CG_ENDRACE. The length travels with the
 // message so it is a server setting, not something baked into the ROM.
+// kind (1110; was padding, always 0): LOBBYCOUNT_CLOCK that clock, as ever;
+// LOBBYCOUNT_WATCHERS, the spectators now watching the room's race in
+// seconds' place (Watchers_Send, SV_main.c: as one has caught up and as one
+// leaves), which the racers' HUD shows as WATCHERS (octr->watchers).
 struct SG_MessageLobbyCountdown
 {
 	// 15 types, 15 bytes max
 	unsigned char type : 4;
-	unsigned char padding : 4;
+	unsigned char kind : 4;
 
-	// seconds until the room resets
+	// seconds until the room resets - or, LOBBYCOUNT_WATCHERS, the
+	// spectators watching
 	unsigned char seconds;
 };
+
+#define LOBBYCOUNT_CLOCK    0
+#define LOBBYCOUNT_WATCHERS 1
 
 STATIC_ASSERT2(sizeof(struct SG_Header) == 1, "Size of SG_Header must be 1 byte");
 STATIC_ASSERT2(sizeof(struct SG_MessageHost) == 1, "Size of SG_MessageHost must be 1 byte");
 STATIC_ASSERT2(sizeof(struct SG_MessageVote) == 3 + MAX_NUM_PLAYERS, "Size of SG_MessageVote must be 3 + MAX_NUM_PLAYERS bytes");
-STATIC_ASSERT2(sizeof(struct SG_MessageRooms) == 14, "Size of SG_MessageRooms must be 14 bytes");
+STATIC_ASSERT2(sizeof(struct SG_MessageKickVote) == 4, "Size of SG_MessageKickVote must be 4 bytes");
+STATIC_ASSERT2(sizeof(struct SG_MessageRooms) == 16, "Size of SG_MessageRooms must be 16 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageClientStatus) == 2, "Size of SG_MessageClientStatus must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageName) == 2 + NAME_LEN + 1, "Size of SG_MessageName must be 2 + NAME_LEN + 1 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageCharacter) == 2, "Size of SG_MessageCharacter must be 2 bytes");
@@ -1299,6 +1473,16 @@ STATIC_ASSERT2(sizeof(struct SG_EverythingKart) == 18, "Size of SG_EverythingKar
 STATIC_ASSERT2(sizeof(struct SG_MessageWeapon) == 16, "Size of SG_MessageWeapon must be 16 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageWeaponEvent) == 4, "Size of SG_MessageWeaponEvent must be 4 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageEndRace) == 12, "Size of SG_MessageEndRace must be 12 bytes");
+// flags in the gap, the times where they were (1110)
+#ifdef __GNUC__
+STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageEndRace, flags) == 1, "SG_MessageEndRace layout: flags");
+STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageEndRace, courseTime) == 4, "SG_MessageEndRace layout: courseTime");
+STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageRooms, spectateMask) == 14, "SG_MessageRooms layout: spectateMask");
+#else
+STATIC_ASSERT2(offsetof(struct SG_MessageEndRace, flags) == 1, "SG_MessageEndRace layout: flags");
+STATIC_ASSERT2(offsetof(struct SG_MessageEndRace, courseTime) == 4, "SG_MessageEndRace layout: courseTime");
+STATIC_ASSERT2(offsetof(struct SG_MessageRooms, spectateMask) == 14, "SG_MessageRooms layout: spectateMask");
+#endif
 STATIC_ASSERT2(sizeof(struct SG_MessageLobbyCountdown) == 2, "Size of SG_MessageLobbyCountdown must be 2 bytes");
 
 // The lobby idle clock (SG_IDLECOUNTDOWN): seconds left to make a pick -
@@ -1337,9 +1521,11 @@ enum ClientGiveMessageType
 	// what happened to a placed weapon (NET_EV_*; see SG_WEAPONEVENT)
 	CG_WEAPONEVENT,
 
-	// host only: CHANGE HOST or KICK PLAYER (CG_MessageHostAction). The
-	// room hears of it as it hears of a host leaving or a player dropping:
-	// SG_HOST, and the empty SG_NAME of a disconnect.
+	// the host's CHANGE HOST and PLAYER VOTING, anybody's VOTE TO KICK
+	// (CG_MessageHostAction). The room hears of a change of host as of a
+	// host leaving (SG_HOST), of a vote only when it removes a player (the
+	// empty SG_NAME of a disconnect); the voter's answer is SG_VOTE's
+	// VOTE_KICK_REPLY.
 	CG_HOSTACTION,
 
 	// a player's vote, while one runs (CG_MessageVote, SG_VOTE)
@@ -1363,7 +1549,13 @@ struct CG_MessageRoom
 {
 	// 15 types, 15 bytes max
 	unsigned char type : 4;
-	unsigned char padding : 4;
+
+	// JOIN_SPECTATE (1110; was padding): should the room be closed to a
+	// join, take a seat in its race in progress as a spectator, if it can be
+	// watched (SG_MessageRooms.spectateMask; SV_main.c's spectator path); a
+	// refusal is the room list back, as for any join. 0 a player's join, as
+	// ever. The client zeroes the message before it fills it.
+	unsigned char flags : 4;
 
 	unsigned char room;
 
@@ -1374,6 +1566,9 @@ struct CG_MessageRoom
 	// it arrived.
 	unsigned short version;
 };
+
+// CG_MessageRoom.flags (1110)
+#define JOIN_SPECTATE 1
 
 struct CG_MessageName
 {
@@ -1495,10 +1690,10 @@ struct CG_MessageWeaponEvent
 	unsigned char arg;
 };
 
-// The host's OPTIONS: hand the room to a player, or kick one
-// (HOST_ACTION_*), by client ID - and by name, as the host's lobby has it:
-// a seat let go and taken again inside a round trip holds somebody the host
-// never picked, and the server refuses a name that no longer sits there.
+// The lobby's OPTIONS: hand the room to a player, or vote one out
+// (HOST_ACTION_*), by client ID - and by name, as the player's lobby has it:
+// a seat let go and taken again inside a round trip holds somebody the
+// player never picked, and the server refuses a name that no longer sits there.
 struct CG_MessageHostAction
 {
 	unsigned char type : 4;
@@ -1520,7 +1715,13 @@ struct CG_MessageEndRace
 {
 	// 15 types, 15 bytes max
 	unsigned char type : 4;
+
+	// bit 0 ENDRACE_BOT (1110): this player's kart drives on as the bot past
+	// the line, and its kart messages go on - the server keeps it with the
+	// finish (a spectator's catch-up) and passes it on in SG_ENDRACE's flags.
+	// Bits 1-3 are 0 (the client's message is zeroed).
 	unsigned char padding : 4;
+
 	int courseTime;
 	int lapTime;
 };
@@ -1569,7 +1770,7 @@ struct OctrQueryReply
 	unsigned int token;                    // the query's
 	unsigned char counts[16];              // the players seated in each room, as SG_ROOMS counts them
 	unsigned short closedMask;             // the rooms not open to a join now, as SG_ROOMS has them
-	unsigned short pad;
+	unsigned short spectateMask;           // the rooms whose race can be watched now, as SG_ROOMS has them (1110; was pad)
 };
 
 STATIC_ASSERT2(sizeof(struct OctrQuery) == 32, "Size of OctrQuery must be 32 bytes");

@@ -12,8 +12,8 @@
 // octr-server.env.example; SV_heartbeat.h), never compiled in. Any value
 // here can be overridden at build time (-DNAME=value) without editing this
 // file. What the clients must agree on - the seats, the protocol's numbers,
-// the vote's and the kick ban's seconds - is in global.h, shared with the
-// ROM and the PC client, not here.
+// the vote's and the kick ban's seconds, the votes a kick needs - is in
+// global.h, shared with the ROM and the PC client, not here.
 
 #ifndef SV_CONFIG_H
 #define SV_CONFIG_H
@@ -25,8 +25,9 @@
 #define MAX_PEERS_PER_IP 12
 #endif
 
-// The host's kicks held at once (KickBan_*, SV_main.c): the addresses kept
-// out of the room they were kicked from for KICK_BAN_SECONDS (global.h).
+// The kicks held at once (KickBan_*, SV_main.c): the addresses of the players
+// a room voted out (VOTE TO KICK, KickVote_*; the host's KICK PLAYER up to
+// 1109), each kept out of that room for KICK_BAN_SECONDS (global.h).
 #ifndef KICK_BANS
 #define KICK_BANS 64
 #endif
@@ -95,6 +96,36 @@
 // CANCEL undid it on their machine.
 #ifndef LOAD_TIMEOUT_SECONDS
 #define LOAD_TIMEOUT_SECONDS 60
+#endif
+
+// ------------------------------------------------- a race in progress watched
+
+// A race in progress can be watched (1110, Spectator_*, SV_main.c): a player
+// on the room list picks a room that is racing - past its green, not over,
+// with a seat that was empty when the race loaded - and is seated in it as a
+// spectator, kept out of the race and its rules, caught up once its own load
+// is done, and a player of the room from its reset on. 0 here, or
+// --nospectate at launch, turns it off: no room is ever offered to watch
+// (SG_ROOMS' spectateMask is 0) and a join that asks is refused as a closed
+// room's.
+#ifndef SPECTATE_ENABLED
+#define SPECTATE_ENABLED 1
+#endif
+
+// No race is offered to watch in the last SPECTATE_CLOSE_SECONDS before the
+// lobby-return timer forces the room back (LOBBY_RETURN_SECONDS, from the
+// first finish): a spectator's own load takes a good part of that, and one
+// arriving as the room resets would come into a lobby still loading.
+#ifndef SPECTATE_CLOSE_SECONDS
+#define SPECTATE_CLOSE_SECONDS 20
+#endif
+
+// A spectator that has not reached its race SPECTATE_LOAD_SECONDS after it
+// sat down - its name never came, or its load never ended - is removed as an
+// idle player is (DISCONNECT_REASON_IDLE), so its seat is not held for good.
+// A load takes a fraction of it, as LOAD_TIMEOUT_SECONDS says.
+#ifndef SPECTATE_LOAD_SECONDS
+#define SPECTATE_LOAD_SECONDS 60
 #endif
 
 // ------------------------------------------------- contested weapon touches

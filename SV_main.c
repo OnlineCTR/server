@@ -35,20 +35,21 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1109
+#define SV_PROTOCOL 1110
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
 // copy - an earlier release's global.h left next to the sources - would fail
 // a page further down with undeclared message types and incomplete structs;
 // this says what actually went wrong. NET_WEAPON_EVENTS is the newest
-// thing this file needs from the header (9: a shield's bump claimed too,
-// NET_CLAIM_HIT, 1109; 8: a masked kart's bump claimed,
+// thing this file needs from the header (10: a squish claimed too, and
+// Saffi's own flame colour, FLAME_SAFFI, 1110; 9: a shield's bump claimed
+// too, NET_CLAIM_HIT, 1109; 8: a masked kart's bump claimed,
 // NET_EV_KART_CLAIM, 1107; 5: the game modes' events,
 // NET_EV_LAP / NET_EV_OUT / NET_EV_IT, and SG_STARTLOADING's round code;
 // 4: 4-bit IDs, 12-bit identity, the rooms' closed mask; 3: the weapons'
 // arbitration, Tiger Temple's door, the item-less rooms' ghost bombs).
-#if !defined(NET_WEAPON_EVENTS) || (NET_WEAPON_EVENTS < 9)
+#if !defined(NET_WEAPON_EVENTS) || (NET_WEAPON_EVENTS < 10)
 #error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 // The game modes' rounds (Round_*: the ROUND_* causes and codes, TAG_*,
@@ -60,9 +61,11 @@
 // The seats changed with no message changing size (10 to 12 before 1101): a
 // 10-seat global.h would still build, as a server that seats 10, and nothing
 // on the wire would say so.
-// The host's OPTIONS (CG_HOSTACTION, DISCONNECT_REASON_KICKED) and the
-// players' vote (SG_VOTE, CG_VOTE): 1101.
-#if !defined(NET_HOST_ACTIONS) || (NET_HOST_ACTIONS < 1) || !defined(NET_VOTING) || (NET_VOTING < 1)
+// The lobby's OPTIONS (CG_HOSTACTION, DISCONNECT_REASON_KICKED) and the
+// players' vote (SG_VOTE, CG_VOTE): 1101; 2, the room's VOTE TO KICK in the
+// host's KICK PLAYER's place (HOST_ACTION_KICKVOTE / KICKUNVOTE,
+// KICK_VOTES_BY_PLAYERS, SG_VOTE's VOTE_KICK_REPLY): 1110.
+#if !defined(NET_HOST_ACTIONS) || (NET_HOST_ACTIONS < 2) || !defined(NET_VOTING) || (NET_VOTING < 1)
 #error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 #if !defined(MAX_NUM_PLAYERS) || (MAX_NUM_PLAYERS != 12)
@@ -72,6 +75,15 @@
 // NET_LAP_*): 1104. Without it the relay below names fields an older
 // header does not have.
 #if !defined(NET_KART_LAPS) || (NET_KART_LAPS < 1)
+#error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
+#endif
+// A race in progress watched (CG_MessageRoom's JOIN_SPECTATE,
+// SG_MessageRooms.spectateMask, NEWCLIENT_SPECTATOR), the racers told how
+// many watch (SG_MessageLobbyCountdown's kind, LOBBYCOUNT_WATCHERS), and a
+// finished player's kart driven on by the bot (ENDRACE_BOT,
+// SG_MessageEndRace.flags): 1110. An older header has none of these names,
+// and its SG_ROOMS is two bytes short.
+#if !defined(NET_SPECTATE) || (NET_SPECTATE < 1)
 #error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 
@@ -112,6 +124,8 @@ int AnyMatchIPBanL(unsigned int IP);
 typedef struct {
 	ENetPeer* peer;
 
+	// Given once, by the seat's first CG_NAME with one in (1110: the vote
+	// to kick goes by it); the join's memset empties it for the next player.
 	char name[NAME_LEN];
 	char characterID;
 	char boolLoadSelf;
@@ -121,6 +135,14 @@ typedef struct {
 	// Their vote in the room's vote running (Vote_*): the option + 1, 0
 	// none - so the join's memset is no vote.
 	unsigned char vote;
+
+	// Their votes to kick (KickVote_*, 1110): bit t against the player in
+	// seat t, one each at most - the room's masks together are who votes
+	// against whom. Secret: only this player is ever answered with theirs
+	// (SG_VOTE's VOTE_KICK_REPLY). Wiped at the countdown; a leaver's go
+	// with them, and every vote against them (KickVote_Forget). The join's
+	// memset clears it too. Server-only.
+	unsigned short kickVotes;
 
 	// Lobby idle budget (IdleRun and friends): ms left, and enet_time_get()
 	// when the clock last started running, 0 while it is paused. Server-only,
@@ -144,14 +166,49 @@ typedef struct {
 	// (enet_time_get() | 1; 0 never). A shield's (1109): one claim for the
 	// shield this player fired last (its count, shieldSerial: the same count
 	// again is that shield let go - thrown, it bumps nobody), spent by the
-	// claim - a shield's bump is its pop. Cleared as each race loads
-	// (shieldSerial to SHIELD_SERIAL_NONE, which no count is); a join's
-	// memset clears them too, and a race loads before a joiner fires.
+	// claim - a shield's bump is its pop. A squish's (1110): when this
+	// player's kart message last showed Saffi (FLAME_SAFFI, CG_RACEDATA),
+	// and when this player last fired a TURBO (CG_WEAPON). Cleared as each
+	// race loads (shieldSerial to SHIELD_SERIAL_NONE, which no count is); a
+	// join's memset clears them too, and a race loads before a joiner fires.
 	// Server-only.
 	enet_uint32 maskShotAt;
 	enet_uint32 claimAt[MAX_CLIENTS];
 	unsigned char shieldClaim;
 	unsigned short shieldSerial;
+	enet_uint32 saffiSeenAt;
+	enet_uint32 turboShotAt;
+
+	// A race in progress watched (1110, Spectator_*). spectator: 0 a player;
+	// 1 a spectator seated and held - on the room list, or loading the race
+	// it joined - sent none of the room's broadcasts but its SG_NAMEs and
+	// SG_HOST once its load is out (Broadcast_Held); 2 watching, caught up
+	// at its CG_STARTRACE (Spectator_CatchUp) and sent everything from then
+	// on. A spectator is in no race rule and no lobby count (Round_IsIn,
+	// Vote_Voter, Room_Players, WeaponHold_Window, ...) and is never named to
+	// the racers; the room's reset makes it a player (ResetRoomAfterRace).
+	// welcomePending: the room reset while it was loading, its welcome due at
+	// its CG_STARTRACE (Spectator_Welcome). loadSent: its SG_STARTLOADING
+	// went (the answer to its CG_NAME). spectateAt: when it sat down
+	// (SPECTATE_LOAD_SECONDS; never 0 then), 0 once that clock has removed
+	// it. The join's memset clears all four. Server-only.
+	char spectator;
+	char welcomePending;
+	char loadSent;
+	enet_uint32 spectateAt;
+
+	// This race as a spectator's catch-up retells it (1110,
+	// Spectator_CatchUp): the order this player's CG_ENDRACE came in (1 the
+	// first, 0 none yet), its ENDRACE_BOT, its course and best-lap times, and
+	// the last kart message relayed for them, as the room got it. Kept after
+	// they leave (a finisher's kart stays on every racer's screen); cleared as
+	// each race loads. Server-only.
+	unsigned char endOrder;
+	unsigned char endFlags;
+	int endCourse;
+	int endLap;
+	struct SG_EverythingKart lastKart;
+	char hasLastKart;
 } PeerInfo;
 
 typedef struct
@@ -184,6 +241,11 @@ typedef struct
 	// push a fresh room list the moment it changes (a clock crossing the
 	// close line, and back when the player it belonged to is gone).
 	char boolJoinClosed;
+
+	// ...and whether it said the race in it can be watched (1110,
+	// RoomOpenForSpectate): the green passing, the close before the forced
+	// return, the last spare seat taken, all pushed the same way.
+	char boolSpectateOpen;
 
 	// The players' vote for the track, then the laps (Vote_*): the vote
 	// running (VOTE_*), whether the room votes at all - the host's PLAYER
@@ -222,6 +284,19 @@ typedef struct
 	// load's time is up: whoever has not loaded LOAD_TIMEOUT_SECONDS after it
 	// is removed (ServerState_Tick). Same wrap-safe arithmetic as endTime.
 	enet_uint32 loadStartAt;
+
+	// The race as a spectator joins it (1110, Spectator_*), server-only:
+	// raceSeats, the seats with a player as it loaded (SG_STARTLOADING) - no
+	// other seat is given to a spectator (SpectateSeat: a racer's seat still
+	// has their kart on every screen, left or not), and only these are
+	// named to one; roundCode, the round code that message carried
+	// (Round_Begin), 0 once Round_Tick calls the round off at the green - a
+	// spectator's own SG_STARTLOADING carries it; endCount, the CG_ENDRACEs
+	// counted so far, for their order (PeerInfo.endOrder). Set as each race
+	// loads.
+	unsigned short raceSeats;
+	unsigned char roundCode;
+	unsigned char endCount;
 
 	// The game modes' round this race (Round_*), server-only. roundOn: the
 	// race loaded as a round (SG_STARTLOADING's code was not 0); roundGreenAt:
@@ -285,18 +360,21 @@ RoomInfo roomInfos[16] = { NULL };
 
 // Defined with the idle clock helpers further down; the room list needs it.
 static int RoomOpenForJoin(RoomInfo* ri);
+// (and whether its race can be watched: 1110, beside it)
+static int RoomOpenForSpectate(RoomInfo* ri);
 
 // ------------------------------------------------------------- kick bans
 //
-// The host's KICK PLAYER (CG_HOSTACTION) keeps that player out of the room
-// they were kicked from for KICK_BAN_SECONDS, by their address - the one
-// thing a reconnect keeps (a household behind one NAT shares it, and is kept
-// out of that room along with them). The room shows closed to them, on their
-// room list and in Quick Play's query (KickBan_Mask), and a join is refused;
-// every other room is theirs. Kept apart from RoomInfo, so the room emptying
-// (its memset) does not lift it. Never on the wire; KICK_BAN_SECONDS is in
-// global.h, as the client goes by it too (ServerLive_Kicked, CL_main.cpp).
-// How many at once (KICK_BANS): SV_config.h.
+// The room's VOTE TO KICK (KickVote_*; the host's KICK PLAYER up to 1109)
+// keeps the player it removes out of the room they were voted out of for
+// KICK_BAN_SECONDS, by their address - the one thing a reconnect keeps (a
+// household behind one NAT shares it, and is kept out of that room along
+// with them). The room shows closed to them, on their room list and in
+// Quick Play's query (KickBan_Mask), and a join is refused; every other room
+// is theirs. Kept apart from RoomInfo, so the room emptying (its memset)
+// does not lift it. Never on the wire; KICK_BAN_SECONDS is in global.h, as
+// the client goes by it too (ServerLive_Kicked, CL_main.cpp). How many at
+// once (KICK_BANS): SV_config.h.
 
 static struct
 {
@@ -311,6 +389,8 @@ static int voteSeconds = VOTE_SECONDS;           // --votesecs: shorter, for tes
 static int tagSeconds = TAG_SECONDS;             // --tagsecs: TAG's clock, shorter for testing
 static int loadSeconds = LOAD_TIMEOUT_SECONDS;   // --loadsecs: the wait on a load, shorter for testing
 static int tagFirst = -1;                        // --tagfirst: TAG's first "it" by client ID, for testing (-1 at random)
+static int kickVoteLog = 0;                      // --kicklog: every vote to kick in the log, voter and all - for testing only (KickVote_*)
+static int spectateEnabled = SPECTATE_ENABLED;   // --nospectate: 0, no race in progress can be watched (RoomOpenForSpectate)
 
 static void KickBan_Add(enet_uint32 ip, int room)
 {
@@ -393,6 +473,28 @@ void PrintPrefix(const int roomId)
 	}
 }
 
+// The room's broadcasts skip a spectator still held (1110, spectator 1: on
+// the room list, or loading the race it joined). It is told the race in one
+// go at its CG_STARTRACE (Spectator_CatchUp), in order, and anything of the
+// room's before that would come out of order with it - or, a kart message,
+// a verdict, a finish, reach a client with no race yet to put it in. Two
+// kinds get through once its SG_STARTLOADING has gone (loadSent) and while
+// no welcome is pending: SG_NAME - a racer leaving during its load empties
+// their name before its karts are born, or has their kart held after - and
+// SG_HOST. The message's type is its first byte's low nibble, as every
+// message's is.
+static int Broadcast_Held(const PeerInfo* pi, const void* data)
+{
+	int type;
+
+	if (pi->spectator != 1)
+		return 0;
+	type = ((const unsigned char*)data)[0] & 0xF;
+	if ((type == SG_NAME || type == SG_HOST) && pi->loadSent && !pi->welcomePending)
+		return 0;
+	return 1;
+}
+
 // similar to enet_host_broadcast
 void broadcastToPeersUnreliable(RoomInfo* ri, const void* data, size_t size)
 {
@@ -406,6 +508,10 @@ void broadcastToPeersUnreliable(RoomInfo* ri, const void* data, size_t size)
 			continue;
 
 		if (currentPeer->state != ENET_PEER_STATE_CONNECTED)
+			continue;
+
+		// (a spectator held: Broadcast_Held)
+		if (Broadcast_Held(&ri->peerInfos[i], data))
 			continue;
 
 		enet_peer_send(currentPeer, 0, packet);
@@ -428,6 +534,10 @@ void broadcastToPeersReliable(RoomInfo* ri, const void* data, size_t size)
 			continue;
 
 		if (currentPeer->state != ENET_PEER_STATE_CONNECTED)
+			continue;
+
+		// (a spectator held: Broadcast_Held)
+		if (Broadcast_Held(&ri->peerInfos[i], data))
 			continue;
 
 		enet_peer_send(currentPeer, 0, packet);
@@ -464,11 +574,17 @@ void SendRoomData(ENetPeer* peer)
 
 // The players in each room, and in closedMask the rooms that cannot be
 // joined (RoomOpenForJoin), which the ROM shows as locked and, inside the
-// room, as ROOM CLOSED on the PLAYERS box (lobbyGrid.c).
+// room, as ROOM CLOSED on the PLAYERS box (lobbyGrid.c). And in
+// spectateMask (1110) the rooms whose race can be watched now
+// (RoomOpenForSpectate), which the ROM offers as MATCH IN PROGRESS,
+// SPECTATE on a row it cannot join (hostOptions.c). Its spectators are
+// counted with its players: they hold a seat.
 #define SETUP(x, index) \
 	x = roomCount[index]; \
 	if (!RoomOpenForJoin(&roomInfos[index])) \
-		mr.closedMask |= (unsigned short)(1u << (index));
+		mr.closedMask |= (unsigned short)(1u << (index)); \
+	if (RoomOpenForSpectate(&roomInfos[index])) \
+		mr.spectateMask |= (unsigned short)(1u << (index));
 
 	// Do NOT use roomInfos[index].clientCount,
 	// cause that doesnt account for empty holes
@@ -504,6 +620,12 @@ void SendRoomData(ENetPeer* peer)
 	// whose lobby would read ROOM CLOSED from it (lobbyGrid.c)
 	{
 		unsigned short ban = KickBan_Mask(peer->address.host);
+
+		// nor, there, a race to watch (1110): a spectator is one of the
+		// room's players from its reset on - and the join's check refuses
+		// it anyway (CG_JOINROOM)
+		mr.spectateMask &= (unsigned short)~ban;
+
 		for (int i = 0; i < 16; i++)
 			for (int j = 0; j < MAX_CLIENTS; j++)
 				if (roomInfos[i].peerInfos[j].peer == peer)
@@ -556,6 +678,10 @@ static int OctrQuery_Intercept(ENetHost* host, ENetEvent* event)
 				r.counts[i]++;
 		if (!RoomOpenForJoin(&roomInfos[i]))
 			r.closedMask |= (unsigned short)(1u << i);
+		// and the races that can be watched (1110), as SG_ROOMS has them -
+		// never in a room the asker was kicked from (above)
+		if (RoomOpenForSpectate(&roomInfos[i]))
+			r.spectateMask |= (unsigned short)(1u << i);
 	}
 
 	b.data = &r;
@@ -613,8 +739,29 @@ static int HasValidHost(RoomInfo* ri)
 // (only the whole-room memset clears it), which is the same trap SendRoomData
 // warns about - "Do NOT use roomInfos[index].clientCount, cause that doesnt
 // account for empty holes".
+// The lowest seat still connected comes first (1110), as Vote_Voter has it:
+// one vote to kick can bring on another (KickVote_Check), and a host voted
+// out whose DISCONNECT lands first would otherwise hand the room to a lower
+// seat already on its way out too - a host for a round trip, then a second
+// migration. If none is (every one left on its way out: kicks, idle
+// removals), any seat with a peer, as before.
+// A spectator's seat (1110) only when no player's is left connected: the
+// host's role is the lobby's, and a spectator is in the lobby only from the
+// room's reset on - one still loading then is welcomed only at its own
+// CG_STARTRACE (welcomePending), and a host with no clock till then would
+// hold up the room's track pick. Among spectators, the lowest seat, as for
+// the players.
 static int PickNewHost(RoomInfo* ri)
 {
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].peer->state == ENET_PEER_STATE_CONNECTED &&
+			ri->peerInfos[i].spectator == 0)
+			return i;
+
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].peer->state == ENET_PEER_STATE_CONNECTED)
+			return i;
+
 	for (int i = 0; i < MAX_CLIENTS; i++)
 		if (ri->peerInfos[i].peer != 0)
 			return i;
@@ -629,6 +776,35 @@ static void SendHost(RoomInfo* ri)
 	sg.hostID = ri->hostID & 0xF;
 
 	broadcastToPeersReliable(ri, &sg, sizeof(struct SG_MessageHost));
+}
+
+// The spectators watching this race (caught up: spectator 2), to the room:
+// the racers' WATCHERS (1110, Matt: playerCount.c draws the count, from
+// octr->watchers, while it is 1 or more). SG_LOBBYCOUNTDOWN with its kind
+// LOBBYCOUNT_WATCHERS, the count in its seconds' place - reliable on
+// channel 0, as every room broadcast, so each count lands in order. Sent in
+// exactly two places: as a spectator is caught up (CG_STARTRACE), and as one
+// watching leaves (ProcessDisconnectEvent, its seat already emptied, so the
+// count leaves it out). A spectator still held is sent none (the hold), and
+// one watching gets the count too, which its HUD never shows. Nothing at the
+// room's reset: every client clears its count at the next load
+// (SG_STARTLOADING).
+static void Watchers_Send(RoomInfo* ri)
+{
+	struct SG_MessageLobbyCountdown sg;
+	int n = 0;
+
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].spectator == 2)
+			n++;
+
+	sg.type = SG_LOBBYCOUNTDOWN;
+	sg.kind = LOBBYCOUNT_WATCHERS;
+	sg.seconds = (unsigned char)n;
+	broadcastToPeersReliable(ri, &sg, sizeof(struct SG_MessageLobbyCountdown));
+
+	PrintPrefix((int)(ri - roomInfos) + 1);
+	printf("%d spectator%s watching the race, the racers told\n", n, n == 1 ? "" : "s");
 }
 
 // ------------------------------------------------------------- idle clock
@@ -706,12 +882,18 @@ static void IdlePause(PeerInfo* pi)
 }
 
 // The players in the room now: the seats with a connection, not one on its
-// way out (a kick's, an idle removal's: enet_peer_disconnect).
+// way out (a kick's, an idle removal's: enet_peer_disconnect), nor a
+// spectator's (1110): one watching is in no lobby of this room's, and one
+// whose welcome is pending (the room reset while it loaded) joins the lobby
+// only at its welcome (Spectator_Welcome) - until then its seat is nobody to
+// wait on, so a room of one player and a spectator loading is a room of one.
+// (The room list and the site count spectators: they hold a seat.)
 static int Room_Players(RoomInfo* ri)
 {
 	int n = 0;
 	for (int i = 0; i < MAX_CLIENTS; i++)
-		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].peer->state == ENET_PEER_STATE_CONNECTED)
+		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].peer->state == ENET_PEER_STATE_CONNECTED &&
+			ri->peerInfos[i].spectator == 0)
 			n++;
 	return n;
 }
@@ -808,6 +990,44 @@ static int RoomOpenForJoin(RoomInfo* ri)
 	return 1;
 }
 
+// The seat a spectator gets in this room (1110): the lowest empty one that
+// was empty as the race loaded too (not in raceSeats) - a racer's seat, left
+// or not, still has their kart on every racer's screen, parked or driven on,
+// and a spectator in it would be that kart to nobody (decision 3). -1: none.
+static int SpectateSeat(RoomInfo* ri)
+{
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (ri->peerInfos[i].peer == 0 && ((ri->raceSeats >> i) & 1) == 0)
+			return i;
+	return -1;
+}
+
+// Can the race in this room be watched right now (1110: a join with
+// JOIN_SPECTATE takes a seat in it as a spectator, CG_JOINROOM)? Only while
+// it runs: past its green - a round's lights still showing (roundGreenAt)
+// could yet call the round off, which a spectator's SG_STARTLOADING would
+// already have said otherwise - and not over (boolEndAll: the results
+// countdown, too short for a load); not in the last SPECTATE_CLOSE_SECONDS
+// before the lobby-return timer forces the room back (a load takes a good
+// part of them, and a spectator arriving as the room resets would come into
+// a lobby still loading); and with a seat to give (SpectateSeat). Never in a
+// page of rooms not on offer (ROOM_OPEN_INDEX), nor with --nospectate.
+// (SPECTATE_ENABLED, SPECTATE_CLOSE_SECONDS: SV_config.h)
+static int RoomOpenForSpectate(RoomInfo* ri)
+{
+	if (!spectateEnabled || !ROOM_OPEN_INDEX((int)(ri - roomInfos)))
+		return 0;
+
+	if (!ri->boolRaceAll || ri->boolEndAll || ri->roundGreenAt != 0)
+		return 0;
+
+	if (ri->firstEndTime != 0 &&
+		(int)(enet_time_get() - ri->firstEndTime) >= (LOBBY_RETURN_SECONDS - SPECTATE_CLOSE_SECONDS) * 1000)
+		return 0;
+
+	return SpectateSeat(ri) >= 0;
+}
+
 // The host's clock runs for the track and lap pick, and the whole room is
 // told where it stands: the guests sit on "waiting for the host" and get to
 // see how long that can last. Only while the room is still open (no track
@@ -819,6 +1039,12 @@ static void ArmHostIdle(RoomInfo* ri)
 		return;
 	// (nor for a host on the way out: their promotion arms the next one's)
 	if (ri->peerInfos[ri->hostID].peer->state != ENET_PEER_STATE_CONNECTED)
+		return;
+	// (nor for a spectator's seat, 1110: in the lobby that is one whose
+	// welcome is pending - the room reset while it loaded - and its welcome
+	// arms the clock, Spectator_Welcome; the guests wait on no clock till
+	// then)
+	if (ri->peerInfos[ri->hostID].spectator != 0)
 		return;
 	// (and alone, the host's waits for a second player: Solo_Tick)
 	if (Room_Solo(ri))
@@ -894,9 +1120,12 @@ static void Room_TrackIn(RoomInfo* ri, int trackID, int lapID, int voted)
 	// Track and laps are in: the host's clock simply runs on into the
 	// character pick, and every guest's starts - or resumes, after a
 	// cancelled track. Each is told their own number.
-	// (not one on the way out: a kick's, an idle removal's)
+	// (not one on the way out: a kick's, an idle removal's - nor a
+	// spectator's seat, 1110: one whose welcome is pending has no pick until
+	// its welcome, which starts its clock, Spectator_Welcome)
 	for (int i = 0; i < MAX_CLIENTS; i++)
-		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].peer->state == ENET_PEER_STATE_CONNECTED)
+		if (ri->peerInfos[i].peer != 0 && ri->peerInfos[i].peer->state == ENET_PEER_STATE_CONNECTED &&
+			ri->peerInfos[i].spectator == 0)
 			ArmIdle(ri, i);
 }
 
@@ -925,10 +1154,16 @@ static int Vote_SecondsLeft(RoomInfo* ri)
 	return ms <= 0 ? 1 : (ms + 999) / 1000;
 }
 
-// A player still to be heard: connected (not on the way out - a kick).
+// A player still to be heard: connected (not on the way out - a kick), and
+// a player, not a spectator (1110). In the lobby a spectator's seat is one
+// whose welcome is pending (the room reset while it loaded): it has no vote
+// until it is welcomed (Spectator_Welcome), so the vote closes on the
+// players' votes alone (Vote_Tick), and no clock of its own starts
+// (Solo_Tick) - and, through KickVote_Player, it neither votes to kick nor
+// can be voted out, nor counts in what a kick needs.
 static int Vote_Voter(PeerInfo* pi)
 {
-	return pi->peer != 0 && pi->peer->state == ENET_PEER_STATE_CONNECTED;
+	return pi->peer != 0 && pi->peer->state == ENET_PEER_STATE_CONNECTED && pi->spectator == 0;
 }
 
 // (only the votes the tally counts: Vote_Finish)
@@ -1145,6 +1380,167 @@ static void Solo_Tick(RoomInfo* ri)
 		}
 }
 
+// ----------------------------------------------------- vote to kick (1110)
+//
+// The lobby's VOTE TO KICK, in place of the host's KICK PLAYER: every player
+// in the room has it on OPTIONS (hostOptions.c), against any other player,
+// and picking that player again takes the vote back (HOST_ACTION_KICKVOTE,
+// KICKUNVOTE: CG_HOSTACTION, from any seat). Once the votes against a player
+// reach KICK_VOTES_BY_PLAYERS for the players in the room (global.h, Matt's
+// table: the one voted against counted among them, never voting), they are
+// out, and kept out of the room for KICK_BAN_SECONDS (KickBan_*), as the
+// host's kick kept them. The votes are secret. A vote is answered to its
+// voter alone, with their own votes as they stand (SG_VOTE's
+// VOTE_KICK_REPLY; the client keeps them in octr->kickVotes for the ROM's
+// pick); the room hears of nothing until a player is removed, and then only
+// their empty SG_NAME, as for anybody leaving; and the log gives the count,
+// never who voted (--kicklog, for testing, says it all). Only in the lobby:
+// the countdown (SG_STARTLOADING) wipes every vote, as it closes the ROM's
+// OPTIONS, and a vote crossing it is refused. A leaver's votes go with
+// them, and the votes against them (KickVote_Forget); the room left smaller
+// needs fewer, and the next tick looks again (KickVote_Check). Players are
+// counted as the ROM's PLAYERS title counts them (KickVote_Player):
+// connected, not one already on the way out, and named.
+
+// The votes a kick needs by the players in the room, 0 to MAX_CLIENTS (0:
+// none can be cast - the ROM greys VOTE TO KICK)
+static const unsigned char kickVotesNeeded[] = { KICK_VOTES_BY_PLAYERS };
+STATIC_ASSERT2(sizeof(kickVotesNeeded) == MAX_CLIENTS + 1, "KICK_VOTES_BY_PLAYERS: one count for each number of players, 0 to MAX_NUM_PLAYERS");
+
+// A player the vote to kick counts: still to be heard (Vote_Voter: one on
+// the way out counts no more, nor a spectator's seat, 1110) and named. A
+// newcomer whose CG_NAME is not in yet is a seat the ROMs show nobody in -
+// their PLAYERS count leaves it out (HostOpt_Players, hostOptions.c), so
+// their greying and this count are the same number - and it neither votes
+// nor raises the count the others need.
+// A name stays once given (CG_NAME), so nobody leaves the count by renaming.
+static int KickVote_Player(PeerInfo* pi)
+{
+	return Vote_Voter(pi) && pi->name[0] != 0;
+}
+
+// The votes a kick needs in this room now (0: no vote to kick), and the
+// players that is for. Not Room_Players: that is Room_Solo's count, for the
+// idle clocks and the track vote, where a seat with no name yet is somebody
+// in the room.
+static int KickVote_Needed(RoomInfo* ri, int* players)
+{
+	int n = 0;
+	for (int i = 0; i < MAX_CLIENTS; i++)
+		if (KickVote_Player(&ri->peerInfos[i]))
+			n++;
+	*players = n;
+	return kickVotesNeeded[n];
+}
+
+// The votes against seat t, by the players the vote counts (KickVote_Player).
+static int KickVote_Count(RoomInfo* ri, int t)
+{
+	int n = 0;
+	for (int v = 0; v < MAX_CLIENTS; v++)
+		if (v != t && KickVote_Player(&ri->peerInfos[v]) && ((ri->peerInfos[v].kickVotes >> t) & 1))
+			n++;
+	return n;
+}
+
+// Seat id's own votes gone, and every vote against it: its player is
+// leaving (ProcessDisconnectEvent, KickVote_Kick), or it is a newcomer's
+// (the join - a guard: the last one's went as they left).
+static void KickVote_Forget(RoomInfo* ri, int id)
+{
+	for (int v = 0; v < MAX_CLIENTS; v++)
+		ri->peerInfos[v].kickVotes &= (unsigned short)~(1u << id);
+	ri->peerInfos[id].kickVotes = 0;
+}
+
+// The answer to a vote, to its voter alone: what became of it (KICKVOTE_*)
+// and all their votes as they stand now, which their ROM shows.
+static void KickVote_Reply(ENetPeer* peer, int target, int result, unsigned short mine)
+{
+	struct SG_MessageKickVote sg;
+	memset(&sg, 0, sizeof(sg));
+	sg.type = SG_VOTE;
+	sg.phase = VOTE_KICK_REPLY;
+	sg.result = (unsigned char)(result & 3);
+	sg.target = (unsigned char)target;
+	sg.mine = mine;
+	sendToPeerReliable(peer, &sg, sizeof(struct SG_MessageKickVote));
+}
+
+// Seat t voted out, as the idle clock removes a player (ServerState_Tick):
+// the disconnect says why - the client puts its player back on this
+// server's room list, KICKED BY VOTE - and ProcessDisconnectEvent tells the
+// room once it lands (the empty SG_NAME; a new host, if it was the host).
+// Until then no clock of theirs runs out and no lock-in of theirs starts
+// the race, and their votes, and the votes against them, are gone at once.
+// The log names the player and the count, nobody who voted.
+static void KickVote_Kick(RoomInfo* ri, int t, int votes, int need, int players)
+{
+	PeerInfo* pi = &ri->peerInfos[t];
+
+	pi->idleStart = 0;
+	pi->boolLoadSelf = 0;
+	pi->vote = 0;   // and their vote out of the room's track or lap vote, at once
+	KickVote_Forget(ri, t);
+	KickBan_Add(pi->peer->address.host, (int)(ri - roomInfos));
+
+	PrintPrefix((int)(ri - roomInfos) + 1);
+	printf("Player %.*s (%d) removed by the room's vote (%d of %d needed, %d players), kept out of the room for %ds\n",
+		NAME_LEN, &pi->name[0], t, votes, need, players, kickBanSeconds);
+
+	enet_peer_disconnect(pi->peer, DISCONNECT_REASON_KICKED);
+	if (ri->votePhase != VOTE_NONE)
+		Vote_Broadcast(ri);   // (the kicked one, on the way out, skipped)
+}
+
+// Anybody with the votes against them at the count: out. On each vote cast
+// (CG_HOSTACTION), and each tick (ServerState_Tick) for a room that has got
+// smaller since its votes were cast: fewer players need fewer votes. One
+// removal can bring the count down to another player's votes, so the room
+// is looked at again, as many times as it has seats at most. Never once the
+// race is loading: the countdown wiped the votes. And a room down to fewer
+// players than a vote needs (1110: no vote to kick with one or two, Matt)
+// keeps none: every vote standing is wiped, each voter told (their red
+// names cleared), so nothing from before counts again when a third player
+// comes - nor sits on a pick its voter can no longer open to take it back.
+static void KickVote_Check(RoomInfo* ri)
+{
+	if (ri->boolLoadAll)
+		return;
+
+	for (int pass = 0; pass < MAX_CLIENTS; pass++)
+	{
+		int players;
+		int need = KickVote_Needed(ri, &players);
+		int t, votes = 0;
+
+		if (need == 0)
+		{
+			for (t = 0; t < MAX_CLIENTS; t++)
+			{
+				PeerInfo* pv = &ri->peerInfos[t];
+				if (pv->kickVotes == 0)
+					continue;
+				pv->kickVotes = 0;
+				if (Vote_Voter(pv))
+					KickVote_Reply(pv->peer, 0xFF, KICKVOTE_REMOVED, 0);
+				if (kickVoteLog)
+				{
+					PrintPrefix((int)(ri - roomInfos) + 1);
+					printf("Kick votes (--kicklog): seat %d's wiped, the room down to %d players\n", t, players);
+				}
+			}
+			return;
+		}
+		for (t = 0; t < MAX_CLIENTS; t++)
+			if (Vote_Voter(&ri->peerInfos[t]) && (votes = KickVote_Count(ri, t)) >= need)
+				break;
+		if (t == MAX_CLIENTS)
+			return;
+		KickVote_Kick(ri, t, votes, need, players);
+	}
+}
+
 // --------------------------------------------------------------- the rounds
 //
 // The game modes of room rows 2-5 (ROOM_IS_MODE: POTION GAME, BOMBARDMENT,
@@ -1220,14 +1616,31 @@ static void Round_Send(RoomInfo* ri, int kind, int id, int owner, int serial, in
 	broadcastToPeersReliable(ri, &s, sizeof(struct SG_MessageWeaponEvent));
 }
 
+// The same word to one client alone (1110): a spectator's catch-up retelling
+// the round to it (Spectator_CatchUp), which the room's broadcasts skipped
+// while it was held.
+static void Round_SendTo(ENetPeer* peer, int kind, int id, int owner, int serial, int arg)
+{
+	struct SG_MessageWeaponEvent s;
+	s.type = SG_WEAPONEVENT;
+	s.clientID = id & 0xF;
+	s.owner = owner & 0xF;
+	s.kind = kind & 0xF;
+	s.serial = (unsigned char)serial;
+	s.arg = (unsigned char)arg;
+	sendToPeerReliable(peer, &s, sizeof(struct SG_MessageWeaponEvent));
+}
+
 // A player the round still has: in the room and not placed. (Nobody joins
-// mid-round, so everybody in the room was seated as it loaded; a leaver's
-// seat is empty.) Any ID: out of range is nobody, so a client's 4-bit field
-// can be passed as it came.
+// mid-round as a player, so everybody in the room was seated as it loaded; a
+// leaver's seat is empty.) Never a spectator (1110), who joins mid-round in
+// a seat that was empty at the load, and is in no race. Any ID: out of range
+// is nobody, so a client's 4-bit field can be passed as it came.
 static int Round_IsIn(RoomInfo* ri, int id)
 {
 	return id >= 0 && id < MAX_CLIENTS &&
-		ri->peerInfos[id].peer != 0 && ri->peerInfos[id].place == 0;
+		ri->peerInfos[id].peer != 0 && ri->peerInfos[id].place == 0 &&
+		ri->peerInfos[id].spectator == 0;
 }
 
 static int Round_InCount(RoomInfo* ri)
@@ -1456,12 +1869,13 @@ static void Round_Finish(RoomInfo* ri, int id)
 // with no place (LEFT) - the empty SG_NAME that follows wipes their name, so
 // the results skip them - "it" leaving makes way for a new one on a fresh
 // clock, and in ELIMINATION the lap they were holding up may now be decided.
-// A player already placed keeps their place.
+// A player already placed keeps their place. A spectator leaving (1110) was
+// never in the round: nothing.
 static void Round_Leave(RoomInfo* ri, int id)
 {
 	if (id < 0 || id >= MAX_CLIENTS)
 		return;
-	if (!ri->roundLive || ri->roundOver || ri->peerInfos[id].place != 0)
+	if (!ri->roundLive || ri->roundOver || ri->peerInfos[id].place != 0 || ri->peerInfos[id].spectator != 0)
 		return;
 
 	Round_Place(ri, id, ROUND_NONE, ROUND_CAUSE_LEFT, ROUND_NONE, 0);
@@ -1717,6 +2131,7 @@ static void Round_Tick(RoomInfo* ri)
 	if (in < 2)
 	{
 		ri->roundOn = 0;
+		ri->roundCode = 0;   // (1110) a spectator loads a plain race, as the room races one now
 		ri->itID = ROUND_NONE;
 		ri->itGreenAt = 0;
 		ri->itDeadline = 0;
@@ -1811,6 +2226,19 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 		enet_peer_disconnect_now(ri->peerInfos[peerID].peer, 0);
 		ri->peerInfos[peerID].peer = NULL;
 
+		// The leaver's votes to kick go with them, and every vote against
+		// them (KickVote_Forget); a count the smaller room now reaches is
+		// the tick's (KickVote_Check). Above the boolEndSelf early return
+		// below, so that no way out skips it. A room left below three
+		// players wipes its votes here and now, not on the tick: a newcomer
+		// in the same batch of messages would otherwise find them standing.
+		KickVote_Forget(ri, peerID);
+		{
+			int left;
+			if (KickVote_Needed(ri, &left) == 0)
+				KickVote_Check(ri);   // only the wipe, with nothing to count
+		}
+
 		// Host migration. Must sit ABOVE the boolEndSelf early return below:
 		// a host who quits after crossing the finish line takes that return,
 		// and the promotion would be skipped every single time - which is the
@@ -1853,8 +2281,16 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 		// if this client ended race, dont tell
 		// anyone that the client disconnected - but the room list is
 		// told: their seat is free, and everybody on it saw them in it
-		if (ri->peerInfos[peerID].boolEndSelf != 0)
+		// A spectator's leave (1110) is as silent, whatever its race's state
+		// (its boolEndSelf is set from its join, but not once a reset left
+		// its welcome pending): the racers were never told its name, so an
+		// empty one would tell them nothing - and one watching takes 1 off
+		// the racers' WATCHERS (Watchers_Send: its seat is already emptied,
+		// so the count leaves it out).
+		if (ri->peerInfos[peerID].boolEndSelf != 0 || ri->peerInfos[peerID].spectator != 0)
 		{
+			if (ri->peerInfos[peerID].spectator == 2)
+				Watchers_Send(ri);
 			ForeachPeerLPL(SendRoomData);
 			return;
 		}
@@ -1890,7 +2326,13 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 	ForeachPeerLPL(SendRoomData); //someone left a room, notify everyone else.
 }
 
-void WelcomeNewClient(RoomInfo* ri, int id)
+// special: 0, or NEWCLIENT_SPECTATOR (1110) for a seat taken to watch the
+// race in progress (Spectator_Join): its client keeps the ROM on the room
+// list, puts no name of its own in, and loads the race at the
+// SG_STARTLOADING its CG_NAME is answered with. Every other welcome - a
+// join, the room's reset, a spectator's welcome - is 0, which makes a
+// spectator's client a player's again.
+void WelcomeNewClient(RoomInfo* ri, int id, int special)
 {
 	// Send acceptance to client
 	struct SG_MessageClientStatus mw;
@@ -1898,8 +2340,8 @@ void WelcomeNewClient(RoomInfo* ri, int id)
 	mw.clientID = id;
 	mw.numClientsTotal = ri->clientCount;
 
-	// ordinary day
-	mw.special = 0;
+	// ordinary day (or a spectator's seat)
+	mw.special = special & 0xF;
 #if 0
 	if (GetWeekDay() == 1) mw.special = 1; // Monday
 	if (GetWeekDay() == 3) mw.special = 2; // Wednesday
@@ -2046,6 +2488,7 @@ static enet_uint32 WeaponHold_Window(RoomInfo* ri, int peerID)
 		ENetPeer* p = ri->peerInfos[i].peer;
 		if (i == peerID || p == 0 || p->state != ENET_PEER_STATE_CONNECTED) continue;
 		if (ROUND_IS_OUT(ri->peerInfos[i].cause)) continue;   // a ghost out of the round: it touches nothing
+		if (ri->peerInfos[i].spectator != 0) continue;        // a spectator (1110): no kart, and its claims are dropped
 		if (p->roundTripTime / 2 > w) w = p->roundTripTime / 2;
 	}
 	w += HOLD_STEP_MS + HOLD_MARGIN_MS;
@@ -2107,11 +2550,16 @@ static int WeaponHold_Claim(RoomInfo* ri, ENetPeer* peer, int peerID, struct CG_
 // kart's path by them to where the claimant's screen had it. In item rooms,
 // between two players still in a round, from a player who fired a mask
 // lately (MASK_SHOT_MS: CG_WEAPON) or - a shield's bump - a shield not yet
-// claimed with (shieldClaim: one claim a shield, its pop), at most once a
-// KART_CLAIM_GAP_MS for each pair.
+// claimed with (shieldClaim: one claim a shield, its pop), or - a squish
+// (1110: NET_CLAIM_HIT(3, 5), mask or not) - a player whose kart showed
+// Saffi lately (SAFFI_SEEN_MS: its kart messages' FLAME_SAFFI) or who fired
+// a TURBO lately (TURBO_SHOT_MS), at most once a KART_CLAIM_GAP_MS for each
+// pair.
 #define KART_CLAIM_GAP_MS 400     // the ROM's own gap is 500 ms (CLAIM_GAP_MS)
 #define SHIELD_SERIAL_NONE 0x100  // no shield fired this race: no shot count (8 bits) is it
 #define MASK_SHOT_MS      20000   // a mask's longest, 12 s of game time (0x2d00, 960 a second) and its fade, with room for a game running slow: only a gate against abuse, the bumped kart's machine checks the mask itself
+#define SAFFI_SEEN_MS     3000    // Saffi in the claimant's kart messages (unreliable, every frame) this lately: a squish just after Saffi ended, or past a few lost messages, still goes - only a gate against abuse, the squished kart's machine checks its copy of the rammer itself
+#define TURBO_SHOT_MS     20000   // a TURBO's squish lasts as long as its fire, which boosts can keep going: as the mask's, only a gate against abuse
 static void KartClaim_Relay(RoomInfo* ri, ENetPeer* peer, int peerID, const struct CG_MessageWeaponEvent* r)
 {
 	struct SG_MessageWeaponEvent s;
@@ -2130,7 +2578,10 @@ static void KartClaim_Relay(RoomInfo* ri, ENetPeer* peer, int peerID, const stru
 	if (ri->roundLive && (!Round_IsIn(ri, peerID) || !Round_IsIn(ri, victim))) return;
 	int maskOn = pa->maskShotAt != 0 && (int)(now - pa->maskShotAt) <= MASK_SHOT_MS;
 	int shieldBump = r->serial == NET_CLAIM_HIT(2, 0);
-	if (!maskOn && !(shieldBump && pa->shieldClaim)) return;
+	int squish = r->serial == NET_CLAIM_HIT(3, 5);
+	int saffiOn = pa->saffiSeenAt != 0 && (int)(now - pa->saffiSeenAt) <= SAFFI_SEEN_MS;
+	int turboOn = pa->turboShotAt != 0 && (int)(now - pa->turboShotAt) <= TURBO_SHOT_MS;
+	if (!maskOn && !(shieldBump && pa->shieldClaim) && !(squish && (saffiOn || turboOn))) return;
 	if (pa->claimAt[victim] != 0 && (int)(now - pa->claimAt[victim]) < KART_CLAIM_GAP_MS) return;
 	pa->claimAt[victim] = now | 1;
 	if (shieldBump) pa->shieldClaim = 0;
@@ -2145,6 +2596,386 @@ static void KartClaim_Relay(RoomInfo* ri, ENetPeer* peer, int peerID, const stru
 	s.arg = (rtt > 255) ? 255 : rtt;
 	sendToPeerReliable(vp, &s, sizeof(s));
 }
+
+// --------------------------------------- a race in progress watched (1110)
+//
+// Matt: "If a match is in progress and it has room, add an option to ask the
+// player if they would like to join the match in progress. When they do,
+// simply make them a spectator." A room racing past its green, not over,
+// with a seat that was empty as the race loaded, can be watched
+// (RoomOpenForSpectate: the room list's spectateMask, Quick Play's reply). A
+// join into it that asks (CG_MessageRoom's JOIN_SPECTATE) - the room cannot
+// be joined as a player then - takes that seat as a spectator
+// (Spectator_Join), and its client keeps the ROM on the room list. Its
+// CG_NAME is answered with the racers' names and characters and the race to
+// load, SG_STARTLOADING with the round's code (Spectator_Name): its ROM loads
+// the race on its own, a kart for each racer and its own hidden, parked off
+// the track and finished (spectate.c). While it loads it is held: the room's
+// broadcasts skip it, but for its SG_NAMEs and SG_HOST (Broadcast_Held). Its
+// CG_STARTRACE says its race is loaded: it is caught up in one go, in order
+// - the karts where they are, the round's verdicts, the finishes, the
+// lobby's clock - and started (Spectator_CatchUp); from then on it is
+// watching and gets every message the room gets, and the racers are told
+// how many watch (Watchers_Send). Nothing it sends of a race or a lobby
+// counts (SPECTATOR_DROPS), its name never reaches a racer mid-race, and it
+// is in no race rule and no lobby count (Round_IsIn, Vote_Voter,
+// Room_Players, WeaponHold_Window, PickNewHost's preference) - but it holds
+// a seat, so the room list and the site count it. Its leave is as silent as
+// a finisher's. At the room's reset it is a player again
+// (ResetRoomAfterRace): welcomed with the rest if it was watching or still on
+// the room list, or, still loading, at its own CG_STARTRACE
+// (Spectator_Welcome) - its client never meets a lobby in the middle of a
+// load (the lost-start class: OnlineInit_Drivers would overwrite the lobby
+// state with the race's). With --nospectate none of this ever starts.
+
+// A racer a spectator is told of (its SG_NAMEs, SG_CHARACTERs and the
+// catch-up's kart messages): a seat that was racing as the race loaded
+// (raceSeats), a player's - never another spectator's - and either still in
+// the room or gone after their finish (boolEndSelf: that leave is silent, so
+// every racer's screen still has their kart, named; the catch-up's SG_ENDRACE
+// brakes it at once). A racer gone before finishing has an empty name on
+// every racer's screen (their SG_NAME at the leave): to a spectator, nobody.
+static int Spectator_Racer(RoomInfo* ri, int j)
+{
+	PeerInfo* pj = &ri->peerInfos[j];
+	return ((ri->raceSeats >> j) & 1) && pj->spectator == 0 &&
+		(pj->peer != 0 || pj->boolEndSelf != 0);
+}
+
+// A join that asks to watch (JOIN_SPECTATE) into a room whose race can be
+// (RoomOpenForSpectate, so SpectateSeat has a seat for it): seated as a
+// spectator, held. Its race flags are set as a racer's are at the end of a
+// race - loaded, racing, ended - so the room's load, start and end never
+// wait on it, and its leave is a finisher's, silent. No host claim, no vote
+// and no clock: it is in no lobby until the room's reset. To it alone first
+// - SG_NEWCLIENT marked NEWCLIENT_SPECTATOR (with the host and the vote, as
+// every welcome sends them), then the track (as a late joiner is sent it) -
+// and the room list to everybody after: the reverse of a player's join,
+// which sends the list first. A spectator taking the last spare seat makes
+// its own row one that cannot be watched any more, and a client handed that
+// list ahead of its SG_NEWCLIENT, in an earlier pass of its loop, would
+// give the room list back to its player mid-join (RoomsUnlock_Settle,
+// CL_main.cpp).
+static void Spectator_Join(RoomInfo* ri, ENetPeer* peer)
+{
+	int id = SpectateSeat(ri);
+	PeerInfo* pi;
+	struct SG_MessageTrack st;
+
+	if (id < 0)
+	{
+		SendRoomData(peer);   // (never: RoomOpenForSpectate found it one)
+		return;
+	}
+	pi = &ri->peerInfos[id];
+
+	// if added to end, then increase count (as a player's join)
+	if (id == ri->clientCount)
+		ri->clientCount++;
+
+	memset(pi, 0, sizeof(PeerInfo));
+	pi->peer = peer;
+	pi->spectator = 1;
+	pi->spectateAt = IdleNow();
+	pi->boolLoadSelf = 1;
+	pi->boolRaceSelf = 1;
+	pi->boolEndSelf = 1;
+
+	// nobody's vote to kick against the seat: a guard, as at a player's join
+	KickVote_Forget(ri, id);
+
+	// 5 seconds, as a player's join
+	enet_peer_timeout(peer, 1000000, 1000000, 5000);
+
+	WelcomeNewClient(ri, id, NEWCLIENT_SPECTATOR);
+
+	st.type = SG_TRACK;
+	st.voted = ri->trackVoted;
+	st.padding = 0;
+	st.trackID = ri->levelPlayed;
+	st.lapID = ri->lapPlayed;
+	sendToPeerReliable(peer, &st, sizeof(struct SG_MessageTrack));
+
+	ForeachPeerLPL(SendRoomData); //someone chose a room, notify everyone else.
+
+	PrintPrefix((int)(ri - roomInfos) + 1);
+	printf("Player %d joined room %d as a spectator\n", id, (int)(ri - roomInfos) + 1);
+}
+
+// A spectator's CG_NAME (its client sends it at its SG_NEWCLIENT, with its
+// player's name): the name kept for the room's reset, when the racers are
+// told it - never now (a racer's ROM takes a name to be a kart) - and the
+// race it is to load, unless that race is over already: a name for each
+// racer (Spectator_Racer) and their characters, locked in, then the room's
+// SG_STARTLOADING with the round's code (roundCode), which its client loads
+// from. Over by now (boolEndAll: the last racer finished within the join's
+// round trip): nothing more - its ROM stays on the room list until the reset
+// welcomes it into the lobby as a player (loadSent stays 0). Once: a later
+// CG_NAME from a spectator's seat is ignored (CG_NAME).
+static void Spectator_Name(RoomInfo* ri, int id, const struct CG_MessageName* r)
+{
+	PeerInfo* pi = &ri->peerInfos[id];
+	struct SG_MessageName sn;
+	struct SG_MessageCharacter sc;
+	struct SG_Header sg;
+	int racers = 0;
+
+	// (sanitised, see CopyName; an empty one names nobody, as a player's)
+	if (pi->name[0] == 0 && r->name[0] != 0)
+		CopyName(&pi->name[0], &r->name[0]);
+
+	// "seen in the past 24h", as a player's CG_NAME is
+	if (pi->name[0] != 0)
+	{
+		char nameZ[NAME_LEN + 1];
+		memcpy(nameZ, &pi->name[0], NAME_LEN);
+		nameZ[NAME_LEN] = '\0';
+		Heartbeat_SeenName(pi->peer->data, pi->peer->address.host, nameZ);
+	}
+
+	if (!ri->boolEndAll)
+	{
+		memset(&sn, 0, sizeof(sn));
+		sn.type = SG_NAME;
+		sn.numClientsTotal = ri->clientCount;
+		for (int j = 0; j < MAX_CLIENTS; j++)
+		{
+			if (!Spectator_Racer(ri, j))
+				continue;
+			sn.clientID = j;
+			memcpy(&sn.name[0], &ri->peerInfos[j].name[0], NAME_LEN);
+			sendToPeerReliable(pi->peer, &sn, sizeof(struct SG_MessageName));
+			racers++;
+		}
+
+		for (int j = 0; j < MAX_CLIENTS; j++)
+		{
+			if (!Spectator_Racer(ri, j))
+				continue;
+			memset(&sc, 0, sizeof(sc));
+			sc.type = SG_CHARACTER;
+			sc.clientID = j;
+			sc.characterID = ri->peerInfos[j].characterID;
+			sc.boolLockedIn = 1;
+			sendToPeerReliable(pi->peer, &sc, sizeof(struct SG_MessageCharacter));
+		}
+
+		sg.type = SG_STARTLOADING;
+		sg.padding = ri->roundCode & 0xF;
+		sendToPeerReliable(pi->peer, &sg, sizeof(struct SG_Header));
+		pi->loadSent = 1;
+	}
+
+	PrintPrefix((int)(ri - roomInfos) + 1);
+	if (ri->boolEndAll)
+		printf("Player %d watching room %d is identified as %.*s [%08x]: the race is over, welcomed at the reset\n",
+			id, (int)(ri - roomInfos) + 1, NAME_LEN, &pi->name[0], pi->peer->address.host);
+	else
+		printf("Player %d watching room %d is identified as %.*s [%08x]: sent %d racer%s and the race to load\n",
+			id, (int)(ri - roomInfos) + 1, NAME_LEN, &pi->name[0], pi->peer->address.host,
+			racers, racers == 1 ? "" : "s");
+}
+
+// A spectator's CG_STARTRACE, its race loaded: the race so far, to it alone,
+// all reliable on channel 0, in this order - and from then on it is watching
+// (spectator 2) and gets every message the room gets. Nothing reached it
+// while it was held, and the server is single-threaded, so each thing comes
+// exactly once and in order.
+//   1. Each racer's last kart message (SG_RACEDATA, lastKart), so every kart
+//      starts where it is. Its client takes it as the newest (KartSeq_Newer)
+//      and seeds its hurt numbers from its hurt (CL_main.cpp), so no hurt
+//      from before the join is played again.
+//   2. A round's state (none once roundCode is 0: called off at the green).
+//      Each placed player's verdict, with no attacker and no ROUND_LAST; in
+//      BOMBARDMENT the lives of each player still in; the round's end if it
+//      is over - the bare ROUND_LAST (nobody, no cause), after which the
+//      client takes no more of the round - or, TAG still running, who is it
+//      and the seconds left on its clock (rounded up, as the clients count).
+//   3. Each finish, in the order the room heard them (endOrder), with its
+//      ENDRACE_BOT - but never for a finisher who has left since: every
+//      racer's screen has their kart braked by now (its kart messages
+//      stopped: CL_main.cpp's watchdog), and the spectator brakes it at once.
+//   4. The lobby's clock as the racers count it (LOBBYCOUNT_CLOCK, never
+//      below 1: the server's own clock is what fires): the results' if the
+//      race is over (from endTime - which also covers a round ended with no
+//      finish), the lobby-return's if anybody has finished, none otherwise.
+//   5. The start (SG_STARTRACE): its ROM goes on from its wait.
+// Tiger Temple's door is not retold: an open door is a moment's, and the
+// client drops door events before the race anyway; live ones reach a
+// spectator from here.
+static void Spectator_CatchUp(RoomInfo* ri, int id)
+{
+	PeerInfo* pi = &ri->peerInfos[id];
+	ENetPeer* peer = pi->peer;
+	enet_uint32 now = enet_time_get();
+	int karts = 0, finishes = 0, clock = 0;
+	int j, n;
+
+	// 1. the karts
+	for (j = 0; j < MAX_CLIENTS; j++)
+		if (Spectator_Racer(ri, j) && ri->peerInfos[j].hasLastKart)
+		{
+			sendToPeerReliable(peer, &ri->peerInfos[j].lastKart, sizeof(struct SG_EverythingKart));
+			karts++;
+		}
+
+	// 2. the round
+	if (ri->roundCode != 0)
+	{
+		int row = Round_Row(ri);
+
+		for (j = 0; j < MAX_CLIENTS; j++)
+			if (ri->peerInfos[j].place != 0)
+				Round_SendTo(peer, NET_EV_OUT, j, ROUND_NONE, ri->peerInfos[j].cause, ri->peerInfos[j].place);
+
+		if (row == ROOM_ROW_BOMBARDMENT)
+			for (j = 0; j < MAX_CLIENTS; j++)
+				if (Round_IsIn(ri, j))
+					Round_SendTo(peer, NET_EV_LIVES, j, ROUND_NONE, 0, ri->peerInfos[j].lives);
+
+		if (ri->roundOver)
+			Round_SendTo(peer, NET_EV_OUT, ROUND_NONE, ROUND_NONE, ROUND_LAST, ROUND_NONE);
+		else if (row == ROOM_ROW_TAG)
+		{
+			int none = ri->itID >= MAX_CLIENTS;
+			int running = !none && ri->itGreenAt == 0 && ri->itDeadline != 0;
+			int secs = none ? 0 : tagSeconds;
+			if (running)
+			{
+				int ms = (int)(ri->itDeadline - now);
+				secs = ms <= 0 ? 1 : (ms + 999) / 1000;
+			}
+			Round_SendTo(peer, NET_EV_IT, none ? ROUND_NONE : ri->itID, ROUND_NONE, running ? 1 : 0, secs);
+		}
+	}
+
+	// 3. the finishes, in order
+	for (n = 1; n <= ri->endCount; n++)
+		for (j = 0; j < MAX_CLIENTS; j++)
+		{
+			PeerInfo* pj = &ri->peerInfos[j];
+			struct SG_MessageEndRace se;
+
+			if (pj->endOrder != n)
+				continue;
+			memset(&se, 0, sizeof(se));
+			se.type = SG_ENDRACE;
+			se.clientID = j;
+			se.flags = (pj->peer != 0) ? (unsigned char)(pj->endFlags & ENDRACE_BOT) : 0;
+			se.courseTime = pj->endCourse;
+			se.lapTime = pj->endLap;
+			sendToPeerReliable(peer, &se, sizeof(struct SG_MessageEndRace));
+			finishes++;
+		}
+
+	// 4. the lobby's clock
+	if (ri->boolEndAll || ri->firstEndTime != 0)
+	{
+		struct SG_MessageLobbyCountdown sl;
+
+		if (ri->boolEndAll)
+			clock = RACE_OVER_COUNTDOWN_SECONDS - (int)((now - ri->endTime) / 1000);
+		else
+			clock = LOBBY_RETURN_SECONDS - (int)((now - ri->firstEndTime) / 1000);
+		if (clock < 1)
+			clock = 1;
+
+		sl.type = SG_LOBBYCOUNTDOWN;
+		sl.kind = LOBBYCOUNT_CLOCK;
+		sl.seconds = (unsigned char)clock;
+		sendToPeerReliable(peer, &sl, sizeof(struct SG_MessageLobbyCountdown));
+	}
+
+	// 5. the start
+	{
+		struct SG_Header sg;
+		sg.type = SG_STARTRACE;
+		sg.padding = 0;
+		sendToPeerReliable(peer, &sg, sizeof(struct SG_Header));
+	}
+
+	PrintPrefix((int)(ri - roomInfos) + 1);
+	printf("Player %.*s (%d) loaded and is watching: %d kart%s, %d finish%s%s",
+		NAME_LEN, &pi->name[0], id, karts, karts == 1 ? "" : "s", finishes, finishes == 1 ? "" : "es",
+		ri->roundCode != 0 ? ", the round" : "");
+	if (clock != 0)
+		printf(", %ds on the clock", clock);
+	printf("\n");
+}
+
+// A spectator's CG_STARTRACE when the room reset while it loaded
+// (welcomePending, ResetRoomAfterRace): its load is done, so now it can be
+// put in the lobby - welcomed as a player (SG_NEWCLIENT with no special, and
+// the host and the vote with it), as the reset welcomed everybody else. The
+// racers answered their own CG_NAMEs at the reset while it was still a
+// spectator, so its name is told to the room here: its own CG_NAME after
+// this welcome finds the seat named and tells nobody (CG_NAME), and without
+// this the racers would never learn it - nor their ROMs birth a kart for it
+// in the next race. Then as a join ends: with the track in, the track and
+// its own clock - host or not, everybody is on the character pick then -
+// otherwise the host's clock if it is the host by now, or the host's clock
+// shown. Its race flags are cleared (they were at the reset), and its
+// CG_STARTRACE writes none (CG_STARTRACE): a stale boolRaceSelf would let
+// the next race start while it was still in the lobby.
+static void Spectator_Welcome(RoomInfo* ri, int id)
+{
+	PeerInfo* pi = &ri->peerInfos[id];
+	ENetPeer* peer = pi->peer;
+
+	pi->spectator = 0;
+	pi->welcomePending = 0;
+	pi->loadSent = 0;
+	pi->spectateAt = 0;
+	pi->boolLoadSelf = 0;
+	pi->boolRaceSelf = 0;
+	pi->boolEndSelf = 0;
+	IdleReset(pi);
+
+	EnsureHost(ri, id);
+	WelcomeNewClient(ri, id, 0);
+
+	if (pi->name[0] != 0)
+	{
+		struct SG_MessageName sn;
+		memset(&sn, 0, sizeof(sn));
+		sn.type = SG_NAME;
+		sn.clientID = id;
+		sn.numClientsTotal = ri->clientCount;
+		memcpy(&sn.name[0], &pi->name[0], NAME_LEN);
+		broadcastToPeersReliable(ri, &sn, sizeof(struct SG_MessageName));
+	}
+
+	PrintPrefix((int)(ri - roomInfos) + 1);
+	printf("Player %.*s (%d) loaded after the room's reset: welcomed into the lobby as a player\n",
+		NAME_LEN, &pi->name[0], id);
+
+	if (ri->boolRoomLocked)
+	{
+		struct SG_MessageTrack st;
+		st.type = SG_TRACK;
+		st.voted = ri->trackVoted;
+		st.padding = 0;
+		st.trackID = ri->levelPlayed;
+		st.lapID = ri->lapPlayed;
+		sendToPeerReliable(peer, &st, sizeof(struct SG_MessageTrack));
+
+		ArmIdle(ri, id);
+	}
+	else if (ri->hostID == id)
+		ArmHostIdle(ri);
+	else if (HasValidHost(ri) && ri->peerInfos[ri->hostID].idleStart != 0)
+		SendIdleCountdown(peer, IdleLeftSeconds(&ri->peerInfos[ri->hostID]));
+}
+
+// What a spectator's client sends that is dropped: a race's (CG_RACEDATA,
+// CG_WEAPON, CG_WEAPONEVENT, CG_ENDRACE - it has no kart in the race) and a
+// lobby's (CG_CHARACTER, CG_TRACK, CG_TRACKCANCEL, CG_VOTE, CG_HOSTACTION -
+// it is in no lobby until the reset makes it a player). A client of this
+// release sends none of them (CL_main.cpp); this is the check that does not
+// lean on that. Its CG_NAME and CG_STARTRACE are its own (Spectator_Name,
+// CG_STARTRACE).
+#define SPECTATOR_DROPS ((1u << CG_RACEDATA) | (1u << CG_WEAPON) | (1u << CG_WEAPONEVENT) | (1u << CG_ENDRACE) | \
+	(1u << CG_CHARACTER) | (1u << CG_TRACK) | (1u << CG_TRACKCANCEL) | (1u << CG_VOTE) | (1u << CG_HOSTACTION))
 
 // ProcessReceiveEvent builds each relayed message in one stack buffer
 // (sgBuffer) and casts it to the message: every one it builds there has to
@@ -2181,6 +3012,11 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 		if (peerID == -1)
 			return;
 	}
+
+	// a spectator's (1110): nothing of a race or a lobby (SPECTATOR_DROPS)
+	if (peerID != -1 && ri->peerInfos[peerID].spectator != 0 &&
+		((SPECTATOR_DROPS >> ((struct CG_Header*)recvBuf)->type) & 1))
+		return;
 
 	// switch will compile into a jmp table, no funcPtrs needed
 	switch (((struct CG_Header*)recvBuf)->type)
@@ -2221,45 +3057,22 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 			ri = &roomInfos[r->room];
 
-			// Closed for joining (RoomOpenForJoin): loading, racing, or
-			// somebody's pick clock is nearly out. A chosen track does not
-			// close it any more.
-			if (!RoomOpenForJoin(ri))
-			{
-				// update data, reject player
-				SendRoomData(peer);
-				return;
-			}
-
-			// Kicked from this room by its host a short while ago
-			// (KickBan_Add): it shows closed on their list (SendRoomData), but
-			// this is the check that cannot be raced.
+			// Voted out of this room a short while ago (KickVote_Kick,
+			// KickBan_Add): it shows closed on their list (SendRoomData), but
+			// this is the check that cannot be raced. Ahead of the closed
+			// room's test (1110), so that it keeps them out of a spectator's
+			// seat too: a spectator is the room's player from its reset on.
 			if (KickBan_Mask(peer->address.host) & (1u << r->room))
 			{
 				PrintPrefix(r->room + 1);
-				printf("Join refused (kicked from this room by its host for %ds)\n", kickBanSeconds);
+				printf("Join refused (kicked from this room by a vote, for %ds)\n", kickBanSeconds);
 				SendRoomData(peer);
 				return;
 			}
 
-			// look for empty slot
-			int id = -1;
-			for (int i = 0; i < MAX_CLIENTS; i++)
-				if (ri->peerInfos[i].peer == 0)
-				{
-					id = i;
-					break;
-				}
-
-			// Full room
-			if (id == -1)
-			{
-				// update data, reject player
-				SendRoomData(peer);
-				return;
-			}
-
-			// Avoid duplicate connection (from multiple CG_Room messages)
+			// Avoid duplicate connection (from multiple CG_Room messages).
+			// Ahead of the closed room's test too (1110), for a spectator's
+			// join as for a player's; it only reads the seats.
 			for (int i = 0; i < MAX_CLIENTS; i++)
 			{
 				// Peer is valid
@@ -2283,6 +3096,43 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				}
 			}
 
+			// Closed for joining (RoomOpenForJoin): loading, racing, or
+			// somebody's pick clock is nearly out. A chosen track does not
+			// close it any more. Unless the join asks to watch (1110,
+			// JOIN_SPECTATE) and the race in it can be watched
+			// (RoomOpenForSpectate): a spectator's seat (Spectator_Join).
+			// A JOIN_SPECTATE into a room open again (its race ended between
+			// the list and the press) simply joins, below.
+			if (!RoomOpenForJoin(ri))
+			{
+				if ((r->flags & JOIN_SPECTATE) && RoomOpenForSpectate(ri))
+				{
+					Spectator_Join(ri, peer);
+					break;
+				}
+
+				// update data, reject player
+				SendRoomData(peer);
+				return;
+			}
+
+			// look for empty slot
+			int id = -1;
+			for (int i = 0; i < MAX_CLIENTS; i++)
+				if (ri->peerInfos[i].peer == 0)
+				{
+					id = i;
+					break;
+				}
+
+			// Full room
+			if (id == -1)
+			{
+				// update data, reject player
+				SendRoomData(peer);
+				return;
+			}
+
 
 			// === Connection Accepted ===
 
@@ -2295,6 +3145,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			memset(&ri->peerInfos[id], 0, sizeof(PeerInfo));
 
 			ri->peerInfos[id].peer = peer;
+
+			// nobody's vote to kick against the seat either: a guard, as the
+			// last player's went with them (KickVote_Forget)
+			KickVote_Forget(ri, id);
 
 			ForeachPeerLPL(SendRoomData); //someone chose a room, notify everyone else.
 
@@ -2316,7 +3170,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			else if (ri->votePhase != VOTE_NONE)
 				Vote_Broadcast(ri);
 
-			WelcomeNewClient(ri, id);
+			WelcomeNewClient(ri, id, 0);
 
 			// A full budget for the newcomer. Either they have just become
 			// host (EnsureHost) and their clock starts, or a host is already
@@ -2351,13 +3205,50 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			struct SG_MessageName* s = (struct SG_MessageName*)&sgBuffer[0];
 			struct CG_MessageName* r = (struct CG_MessageName*)recvBuf;
 
+			// A seat's name is given once (1110): the vote to kick finds its
+			// player by it (CG_HOSTACTION), so one that could be changed at
+			// will - a modified client renaming itself every round trip, or
+			// blanking it - would slip every vote against it. Once the seat
+			// has a name, a CG_NAME keeps it: nothing stored, nothing told to
+			// the room, nothing logged. Only the sender is answered, with the
+			// room's names (and, on the character pick, its picks): the
+			// client sends its CG_NAME at every SG_NEWCLIENT, which is the
+			// join and again each time the room comes back from a race
+			// (ResetRoomAfterRace), and its handler has emptied its names
+			// both times - this answer is what refills them. Its name is the
+			// same each time (one per client run), so nothing a real client
+			// does is lost. The join's memset empties the seat for whoever
+			// sits down next. An empty name names nobody: refused, the seat
+			// left unnamed (no name yet, as before any CG_NAME).
+			int named = ri->peerInfos[peerID].name[0] != 0;
+
+			// A spectator's (1110), ahead of the empty name's refusal: it is
+			// answered with the race to load (Spectator_Name), a name in it
+			// or none. Once that has gone (loadSent), or from a seat whose
+			// welcome is pending (it loads still), one is ignored. Its name
+			// reaches the racers only once it is a player (the room's reset,
+			// Spectator_Welcome).
+			if (ri->peerInfos[peerID].spectator != 0)
+			{
+				PeerInfo* pn = &ri->peerInfos[peerID];
+				if (pn->spectator == 1 && !pn->welcomePending && !pn->loadSent)
+					Spectator_Name(ri, peerID, r);
+				break;
+			}
+
+			if (!named && r->name[0] == 0)
+				break;
+
 			s->numClientsTotal = ri->clientCount;
 
 			// save new name (sanitised, see CopyName)
-			CopyName(&ri->peerInfos[peerID].name[0], &r->name[0]);
+			if (!named)
+				CopyName(&ri->peerInfos[peerID].name[0], &r->name[0]);
 
 			// "seen in the past 24h": now address + name, so two players
-			// behind one address are two (SV_heartbeat.h)
+			// behind one address are two (SV_heartbeat.h). Again with each
+			// later CG_NAME (the seat's own name, kept): a player still here
+			// after a race is seen still.
 			{
 				char nameZ[NAME_LEN + 1];
 				memcpy(nameZ, &ri->peerInfos[peerID].name[0], NAME_LEN);
@@ -2367,22 +3258,29 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 			int roomId = (int)(ri - roomInfos) + 1;
 
-			PrintPrefix(roomId);
-			printf("Player %d joined room %d and is now identified as %.*s [%08x]\n",
-				peerID,
-				roomId,
-				NAME_LEN, &ri->peerInfos[peerID].name[0],
-				peer->address.host);
+			if (!named)
+			{
+				PrintPrefix(roomId);
+				printf("Player %d joined room %d and is now identified as %.*s [%08x]\n",
+					peerID,
+					roomId,
+					NAME_LEN, &ri->peerInfos[peerID].name[0],
+					peer->address.host);
+			}
 
 			s->type = SG_NAME;
 
 			// send all OTHER (8) names to THIS (1) client
+			// (never a spectator's, 1110: a racer's ROM takes a name to be a
+			// kart, and a spectator is named to the room only as a player -
+			// the reset's answers, Spectator_Welcome)
 			for (int j = 0; j < MAX_CLIENTS; j++)
 			{
 				if (
 						// skip empty sockets, skip self
 						(ri->peerInfos[j].peer != 0) &&
-						(peerID != j)
+						(peerID != j) &&
+						(ri->peerInfos[j].spectator == 0)
 					)
 				{
 					// send all OTHER (8) names to THIS (1) client
@@ -2392,19 +3290,25 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				}
 			}
 
-			// send THIS (1) name to all OTHER (8) clients
-			s->clientID = peerID;
-			memcpy(&s->name[0], &ri->peerInfos[peerID].name[0], NAME_LEN);
-			broadcastToPeersReliable(ri, s, sizeof(struct SG_MessageName));
+			// send THIS (1) name to all OTHER (8) clients - the first time
+			// only: they hold it from then on, and after a race each of them
+			// is sent it again in the answer to its own CG_NAME (above)
+			if (!named)
+			{
+				s->clientID = peerID;
+				memcpy(&s->name[0], &ri->peerInfos[peerID].name[0], NAME_LEN);
+				broadcastToPeersReliable(ri, s, sizeof(struct SG_MessageName));
+			}
 
 			// A late joiner (the track is in, the room is on the character
 			// pick) is also told everybody's character and lock, so the
-			// player list is right from the first frame.
+			// player list is right from the first frame. (Not a spectator's
+			// seat's, 1110, as for the names.)
 			if (ri->boolRoomLocked)
 			{
 				for (int j = 0; j < MAX_CLIENTS; j++)
 				{
-					if (ri->peerInfos[j].peer == 0 || j == peerID)
+					if (ri->peerInfos[j].peer == 0 || j == peerID || ri->peerInfos[j].spectator != 0)
 						continue;
 
 					struct SG_MessageCharacter sc;
@@ -2556,13 +3460,81 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 		case CG_HOSTACTION:
 		{
-			// The host's OPTIONS in the lobby (hostOptions.c): CHANGE HOST or
-			// KICK PLAYER at another player still in the room. Host only, and
-			// not once the race is loading (SG_STARTLOADING closed the ROM's
-			// OPTIONS too).
+			// The lobby's OPTIONS (hostOptions.c): anybody's VOTE TO KICK
+			// against another player still in the room (KickVote_*), and the
+			// host's CHANGE HOST at one and PLAYER VOTING for the room. Not
+			// once the race is loading (SG_STARTLOADING closed the ROM's
+			// OPTIONS too). The host's instant KICK PLAYER (2, 1101-1109) is
+			// gone: refused below, as any action the host's check does not
+			// know.
 			struct CG_MessageHostAction* r = (struct CG_MessageHostAction*)recvBuf;
 			int target = r->clientID;
 			ENetPeer* tp = (target < MAX_CLIENTS) ? ri->peerInfos[target].peer : 0;
+
+			// A vote to kick, cast or taken back, from any seat. Refused
+			// (KICKVOTE_REFUSED) once the room is loading (a vote crossing
+			// SG_STARTLOADING), from a player on the way out or one with no
+			// name yet (KickVote_Player: not a player the vote counts, 1110),
+			// in a room with no vote to kick (one or two players, 1110 - or,
+			// were the table ever so, a count the others could never reach:
+			// the ROM greys VOTE TO KICK for both),
+			// against oneself, and at a seat that no longer holds the player
+			// picked - by name, as for CHANGE HOST below (a name stays once
+			// given, CG_NAME, so a player cannot step out from under the
+			// votes against them by renaming). Answered either way, to the
+			// voter alone: their votes as they stand, for their ROM to show
+			// (the voter told first, then the kick a cast may bring about).
+			// The room hears nothing of it, and the log nothing unless
+			// --kicklog asks.
+			if (r->action == HOST_ACTION_KICKVOTE || r->action == HOST_ACTION_KICKUNVOTE)
+			{
+				PeerInfo* vi = &ri->peerInfos[peerID];
+				int players;
+				int need = KickVote_Needed(ri, &players);
+				int result;
+
+				// (1110: nor at a spectator's seat - one whose welcome is
+				// pending, the room reset while it loaded - which is nobody the
+				// vote counts, KickVote_Player, and so could never be voted
+				// out: its vote would stand on nothing)
+				if (ri->boolLoadAll || !KickVote_Player(vi) ||
+					need == 0 || need > players - 1 ||
+					target == peerID || tp == 0 || tp->state != ENET_PEER_STATE_CONNECTED ||
+					ri->peerInfos[target].spectator != 0 ||
+					r->name[0] == 0 || memcmp(r->name, &ri->peerInfos[target].name[0], NAME_LEN) != 0)
+					result = KICKVOTE_REFUSED;
+				else if (r->action == HOST_ACTION_KICKVOTE)
+				{
+					vi->kickVotes |= (unsigned short)(1u << target);
+					result = KICKVOTE_CAST;
+				}
+				else
+				{
+					vi->kickVotes &= (unsigned short)~(1u << target);
+					result = KICKVOTE_REMOVED;
+				}
+
+				// (for testing only: this says who votes against whom)
+				if (kickVoteLog)
+				{
+					PrintPrefix((int)(ri - roomInfos) + 1);
+					if (result == KICKVOTE_REFUSED)
+						printf("Kick vote (--kicklog): %.*s (%d) %s seat %d refused\n",
+							NAME_LEN, &vi->name[0], peerID,
+							r->action == HOST_ACTION_KICKVOTE ? "voting against" : "taking back a vote against", target);
+					else
+						printf("Kick vote (--kicklog): %.*s (%d) %s %.*s (%d), %d of %d needed (%d players)\n",
+							NAME_LEN, &vi->name[0], peerID,
+							result == KICKVOTE_CAST ? "votes against" : "takes back their vote against",
+							NAME_LEN, &ri->peerInfos[target].name[0], target,
+							KickVote_Count(ri, target), need, players);
+				}
+
+				KickVote_Reply(peer, target, result, vi->kickVotes);
+				if (result == KICKVOTE_CAST)
+					KickVote_Check(ri);
+				break;
+			}
 
 			// PLAYER VOTING on (clientID 1) or off (0) for the room. Before the
 			// track is in it takes effect at once: off, a vote running stops
@@ -2592,14 +3564,18 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				break;
 			}
 
-			// The seat must still hold the player the host picked, by name (the
+			// CHANGE HOST, the one action left at a player that is the host's
+			// alone (KICK PLAYER's 2 is refused here, with anything else). The
+			// seat must still hold the player the host picked, by name (the
 			// one the server keeps and sends out, CopyName and SG_NAME, so the
 			// two are byte for byte the same): a seat let go and taken again
 			// before this arrived holds somebody else, and a newcomer whose
-			// name is not in yet holds zeros.
+			// name is not in yet holds zeros. Nor a spectator's seat (1110):
+			// one whose welcome is pending is in no lobby yet.
 			if (peerID != ri->hostID || ri->boolLoadAll ||
 				target == peerID || tp == 0 || tp->state != ENET_PEER_STATE_CONNECTED ||
-				(r->action != HOST_ACTION_GIVE && r->action != HOST_ACTION_KICK) ||
+				ri->peerInfos[target].spectator != 0 ||
+				r->action != HOST_ACTION_GIVE ||
 				r->name[0] == 0 || memcmp(r->name, &ri->peerInfos[target].name[0], NAME_LEN) != 0)
 			{
 				// Refused - the player has just gone, say. The sender's client
@@ -2615,48 +3591,23 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				break;
 			}
 
-			if (r->action == HOST_ACTION_GIVE)
-			{
-				// The room is the player's: everybody is told (SG_HOST), and
-				// the old host's ROM goes back to the wait for the track
-				// (hostOptions.c), the new one's on to the track pick
-				// (StatePS1_Lobby_GuestTrackWait). Before the track is in,
-				// the clock that runs is the host's: the old one's stops,
-				// keeping what is left, and the new one's starts.
-				if (!ri->boolRoomLocked)
-					IdlePause(&ri->peerInfos[peerID]);
-				ri->hostID = (unsigned char)target;
-				SendHost(ri);
+			// The room is the player's: everybody is told (SG_HOST), and the
+			// old host's ROM goes back to the wait for the track
+			// (hostOptions.c), the new one's on to the track pick
+			// (StatePS1_Lobby_GuestTrackWait). Before the track is in, the
+			// clock that runs is the host's: the old one's stops, keeping what
+			// is left, and the new one's starts.
+			if (!ri->boolRoomLocked)
+				IdlePause(&ri->peerInfos[peerID]);
+			ri->hostID = (unsigned char)target;
+			SendHost(ri);
 
-				PrintPrefix((int)(ri - roomInfos) + 1);
-				printf("Host %.*s (%d) handed the room to %.*s (%d)\n",
-					NAME_LEN, &ri->peerInfos[peerID].name[0], peerID,
-					NAME_LEN, &ri->peerInfos[target].name[0], target);
+			PrintPrefix((int)(ri - roomInfos) + 1);
+			printf("Host %.*s (%d) handed the room to %.*s (%d)\n",
+				NAME_LEN, &ri->peerInfos[peerID].name[0], peerID,
+				NAME_LEN, &ri->peerInfos[target].name[0], target);
 
-				ArmHostIdle(ri);
-			}
-			else
-			{
-				// Out, as the idle clock removes a player (ServerState_Tick):
-				// the disconnect says why (the client puts its player back on
-				// this server's room list) and ProcessDisconnectEvent tells the
-				// room once it lands. Until then no clock of theirs runs out
-				// and no lock-in of theirs starts the race.
-				PeerInfo* pi = &ri->peerInfos[target];
-				pi->idleStart = 0;
-				pi->boolLoadSelf = 0;
-				pi->vote = 0;   // and their vote out of the room's, at once
-				KickBan_Add(tp->address.host, (int)(ri - roomInfos));
-
-				PrintPrefix((int)(ri - roomInfos) + 1);
-				printf("Host %.*s (%d) kicked %.*s (%d), kept out of the room for %ds\n",
-					NAME_LEN, &ri->peerInfos[peerID].name[0], peerID,
-					NAME_LEN, &pi->name[0], target, kickBanSeconds);
-
-				enet_peer_disconnect(tp, DISCONNECT_REASON_KICKED);
-				if (ri->votePhase != VOTE_NONE)
-					Vote_Broadcast(ri);   // (the kicked one, on the way out, skipped)
-			}
+			ArmHostIdle(ri);
 			break;
 		}
 
@@ -2676,11 +3627,42 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 		case CG_STARTRACE:
 		{
+			PeerInfo* pi = &ri->peerInfos[peerID];
+
 			#if 0
 			printf("Ready to Race: %d\n", peerID);
 			#endif
 
-			ri->peerInfos[peerID].boolRaceSelf = 1;
+			// A spectator's (1110): its race is loaded. The room reset while
+			// it loaded: welcomed into the lobby now (Spectator_Welcome).
+			// Otherwise caught up and watching (Spectator_CatchUp), and the
+			// racers told how many watch (Watchers_Send). Either way it writes
+			// no boolRaceSelf - and first, ahead of the lobby's test below: a
+			// welcome's CG_STARTRACE always comes once the reset has cleared
+			// boolLoadAll, and its boolRaceSelf, never cleared at the next
+			// SG_STARTLOADING, would start that race while it still loaded.
+			if (pi->spectator != 0)
+			{
+				if (pi->spectator == 1)
+				{
+					if (pi->welcomePending)
+						Spectator_Welcome(ri, peerID);
+					else if (ri->boolRaceAll && pi->loadSent)
+					{
+						Spectator_CatchUp(ri, peerID);
+						pi->spectator = 2;
+						Watchers_Send(ri);
+					}
+				}
+				break;
+			}
+
+			// (1110) a late one, in the lobby, must not count for the next
+			// race: a race's start needs every player's from its own load
+			if (!ri->boolLoadAll)
+				break;
+
+			pi->boolRaceSelf = 1;
 			break;
 		}
 
@@ -2705,6 +3687,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// the flame's colour as the sender's screen shows it (FLAME_*, 1102)
 			s->flame = r->flame;
 
+			// Saffi's own blue (1110): its squishes may be claimed
+			// (KartClaim_Relay)
+			if (r->flame == FLAME_SAFFI) ri->peerInfos[peerID].saffiSeenAt = enet_time_get() | 1;
+
 			// its last hurt (NET_HURT_*, 1103): the others hurt their copy of
 			// the kart with this message's position
 			s->hurt = r->hurt;
@@ -2715,6 +3701,12 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// KartSeq_Newer). As they came: the sender's word, as its position is.
 			memcpy(s->lap, r->lap, sizeof(s->lap));
 			s->seq = r->seq;
+
+			// kept, as the room gets it, for a spectator's catch-up (1110,
+			// Spectator_CatchUp): the kart where it is now - the newest to
+			// arrive, a frame's at most from the newest sent
+			memcpy(&ri->peerInfos[peerID].lastKart, s, sizeof(struct SG_EverythingKart));
+			ri->peerInfos[peerID].hasLastKart = 1;
 
 			broadcastToPeersUnreliable(ri, s, sizeof(struct SG_EverythingKart));
 			break;
@@ -2734,8 +3726,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			ri->weaponFate[(peerID << 8) | r->serial] = WEAPON_LIVE;
 
 			// a mask (item 7): its bumps may be claimed (KartClaim_Relay); a
-			// shield (item 6), new (not one let go: the same count), one bump
+			// shield (item 6), new (not one let go: the same count), one bump;
+			// a TURBO (item 0, 1110): its squishes
 			if (r->weapon == 7) ri->peerInfos[peerID].maskShotAt = enet_time_get() | 1;
+			if (r->weapon == 0) ri->peerInfos[peerID].turboShotAt = enet_time_get() | 1;
 			if (r->weapon == 6)
 			{
 				PeerInfo* pw = &ri->peerInfos[peerID];
@@ -2811,7 +3805,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				break;
 			}
 
-			// a masked kart's or a shield's bump: to the bumped kart's machine alone
+			// a masked kart's or a shield's bump, or a squish: to the bumped kart's machine alone
 			if (kind == NET_EV_KART_CLAIM)
 			{
 				KartClaim_Relay(ri, peer, peerID, r);
@@ -2898,6 +3892,25 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			memcpy(&s->courseTime, &r->courseTime, sizeof(r->courseTime));
 			memcpy(&s->lapTime, &r->lapTime, sizeof(r->lapTime));
 
+			// ENDRACE_BOT (1110): this player's kart drives on as the bot past
+			// the line, and its kart messages go on - passed on as it came, so
+			// no machine holds a brake on that copy (CL_main.cpp). Set here or
+			// never: sgBuffer is zeroed for each message. And the finish kept,
+			// in the order the room hears them, for a spectator's catch-up
+			// (Spectator_CatchUp) - the first one only, should a client send
+			// two.
+			s->flags = (unsigned char)(r->padding & ENDRACE_BOT);
+			{
+				PeerInfo* pe = &ri->peerInfos[peerID];
+				if (pe->endOrder == 0)
+				{
+					pe->endOrder = ++ri->endCount;
+					pe->endFlags = s->flags;
+					memcpy(&pe->endCourse, &r->courseTime, sizeof(r->courseTime));
+					memcpy(&pe->endLap, &r->lapTime, sizeof(r->lapTime));
+				}
+			}
+
 			int localTime = 0;
 			memcpy(&localTime, &r->courseTime, sizeof(r->courseTime));
 
@@ -2950,7 +3963,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				// Everybody sees the clock, not just the server log.
 				struct SG_MessageLobbyCountdown sg;
 				sg.type    = SG_LOBBYCOUNTDOWN;
-				sg.padding = 0;
+				sg.kind    = LOBBYCOUNT_CLOCK;
 				sg.seconds = LOBBY_RETURN_SECONDS;
 				broadcastToPeersReliable(ri, &sg, sizeof(struct SG_MessageLobbyCountdown));
 			}
@@ -3235,6 +4248,67 @@ void ServerState_FirstBoot(int argc, char** argv)
 			botCount = atoi(argv[i + 1]);   // the bots' number, this launch
 			i++;
 		}
+		else if (strcmp(argv[i], "--botkick") == 0 && i + 1 < argc)
+		{
+			// the seat (client ID) every bot votes to kick, in every lobby
+			// (SV_backfill.h); out of range, none
+			botKick = atoi(argv[i + 1]);
+			if (botKick < 0 || botKick >= MAX_CLIENTS) botKick = -1;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botspectate") == 0 && i + 1 < argc)
+		{
+			// the last N bots join only to watch a race in progress (1110,
+			// SV_backfill.h)
+			botSpectate = atoi(argv[i + 1]);
+			if (botSpectate < 0) botSpectate = 0;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botspecname") == 0 && i + 1 < argc)
+		{
+			// seconds a spectator bot waits with its CG_NAME after it sits
+			// down (1110: a race over between a join and its name)
+			botSpecNameSecs = atoi(argv[i + 1]);
+			if (botSpecNameSecs < 0) botSpecNameSecs = 0;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botspecload") == 0 && i + 1 < argc)
+		{
+			// seconds a spectator bot "loads" (1110: its CG_STARTRACE after
+			// its SG_STARTLOADING; a room reset during the load)
+			botSpecLoadSecs = atoi(argv[i + 1]);
+			if (botSpecLoadSecs < 0) botSpecLoadSecs = 0;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botleave") == 0 && i + 1 < argc)
+		{
+			// seconds after its finish (--botfinish) or its catch-up (a
+			// spectator bot) that a bot leaves (1110); 0 never
+			botLeaveSecs = atoi(argv[i + 1]);
+			if (botLeaveSecs < 0) botLeaveSecs = 0;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botfinish") == 0 && i + 1 < argc)
+		{
+			// in a plain race, the first N racing bots cross the line, one
+			// after another (1110: a 9th finisher's bot)
+			botFinish = atoi(argv[i + 1]);
+			if (botFinish < 0) botFinish = 0;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botfinishat") == 0 && i + 1 < argc)
+		{
+			// seconds after the green that the first of them does (1110)
+			botFinishAtSecs = atoi(argv[i + 1]);
+			if (botFinishAtSecs < 0) botFinishAtSecs = 0;
+			i++;
+		}
+		else if (strcmp(argv[i], "--botfinishbot") == 0)
+		{
+			// their CG_ENDRACE says ENDRACE_BOT, as a finisher's whose kart
+			// the bot drives on (1110)
+			botFinishBot = 1;
+		}
 #endif
 		else if (strcmp(argv[i], "--votesecs") == 0)
 		{
@@ -3281,6 +4355,20 @@ void ServerState_FirstBoot(int argc, char** argv)
 				fprintf(stderr, "Error: --kickban requires a value\n");
 				exit(EXIT_FAILURE);
 			}
+		}
+		else if (strcmp(argv[i], "--kicklog") == 0)
+		{
+			// every vote to kick in the log, who against whom (KickVote_*):
+			// for testing only - the votes are secret, and a server's console
+			// is read by whoever runs it, who may be playing in the room
+			kickVoteLog = 1;
+		}
+		else if (strcmp(argv[i], "--nospectate") == 0)
+		{
+			// no race in progress can be watched (1110, SPECTATE_ENABLED,
+			// RoomOpenForSpectate): no room offered as one to watch, a join
+			// that asks refused as a closed room's
+			spectateEnabled = 0;
 		}
 		else if (strcmp(argv[i], "--tagsecs") == 0)
 		{
@@ -3413,6 +4501,13 @@ void ServerState_FirstBoot(int argc, char** argv)
 	PrintPrefix(-1);
 	printf("Ready on port %d\n", port);
 
+	// (1110) said, as it differs from every other server's
+	if (!spectateEnabled)
+	{
+		PrintPrefix(-1);
+		printf("Races in progress cannot be watched (--nospectate)\n");
+	}
+
 #if BACKFILL_PLAYERS > 0
 	Backfill_Init(port);
 #endif
@@ -3470,6 +4565,31 @@ static void Heartbeat_Sample(void)
 // cannot drift apart.
 static void ResetRoomAfterRace(RoomInfo* ri)
 {
+	// The spectators first (1110), so that the host's settle below can pick
+	// a player among them. One watching is a player from here, and so is
+	// one still on the room list (its race ended between its join and its
+	// CG_NAME: loadSent 0) - both welcomed with the rest below, which takes
+	// their clients into the lobby, and every player's CG_NAME after it is
+	// answered with their names now (CG_NAME). One still loading the race
+	// is not welcomed yet (welcomePending): an SG_NEWCLIENT in the middle of
+	// its load would have its ROM's race start overwrite the lobby state
+	// (OnlineInit_Drivers: the lost-start class) - it is welcomed at its own
+	// CG_STARTRACE (Spectator_Welcome). Seats emptied during the race are
+	// cleared of it too.
+	for (int i = 0; i < MAX_CLIENTS; i++)
+	{
+		PeerInfo* pi = &ri->peerInfos[i];
+		if (pi->peer == 0 || pi->spectator == 2 || (pi->spectator == 1 && !pi->loadSent))
+		{
+			pi->spectator = 0;
+			pi->welcomePending = 0;
+			pi->loadSent = 0;
+			pi->spectateAt = 0;
+		}
+		else if (pi->spectator == 1)
+			pi->welcomePending = 1;
+	}
+
 	// Settle the host BEFORE the loop: WelcomeNewClient announces whoever
 	// holds the role, so it has to be correct by then. The previous host may
 	// have quit during the race, so re-pick rather than trusting the stored id.
@@ -3497,9 +4617,15 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 		ri->peerInfos[i].boolEndSelf = 0;
 		IdleReset(&ri->peerInfos[i]);
 
+		// (a spectator still loading, 1110: welcomed at its own CG_STARTRACE,
+		// Spectator_Welcome - till then the next race cannot load without
+		// it, its boolLoadSelf 0, and it is in no lobby count or clock)
+		if (ri->peerInfos[i].welcomePending)
+			continue;
+
 		// tell all clients to reset
 		// (also re-announces the host, which SG_NEWCLIENT clears)
-		WelcomeNewClient(ri, i);
+		WelcomeNewClient(ri, i, 0);
 	}
 
 	ri->levelPlayed = 0;
@@ -3516,7 +4642,8 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 
 	// No game mode's round any more (Round_*): nothing judged, no clock, and
 	// every seat's place gone (Round_Begin clears them again at the next
-	// load; the leavers' seats too).
+	// load; the leavers' seats too). No vote to kick either: the countdown
+	// wiped them and none is taken since (KickVote_*) - a guard.
 	ri->roundOn = 0;
 	ri->roundLive = 0;
 	ri->roundOver = 0;
@@ -3527,14 +4654,18 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 	ri->itID = ROUND_NONE;
 	ri->itGreenAt = 0;
 	ri->itDeadline = 0;
+	ri->roundCode = 0;   // (1110: no race to tell a spectator of, nor seats racing)
+	ri->raceSeats = 0;
 	for (int i = 0; i < MAX_CLIENTS; i++)
 	{
 		ri->peerInfos[i].place = 0;
 		ri->peerInfos[i].cause = 0;
 		ri->peerInfos[i].lapsDone = 0;
+		ri->peerInfos[i].kickVotes = 0;
 	}
 
-	// Back in the lobby with fresh budgets; the host's clock starts.
+	// Back in the lobby with fresh budgets; the host's clock starts (not a
+	// host whose welcome is pending, 1110: ArmHostIdle, Spectator_Welcome).
 	ArmHostIdle(ri);
 
 	ForeachPeerLPL(SendRoomData); //race over, re-notify all clients
@@ -3564,6 +4695,10 @@ void ServerState_Tick()
 		// a vote closed: everybody has voted, or its time is up
 		Vote_Tick(ri);
 
+		// a vote to kick at its count in a room smaller than when it was
+		// cast (KickVote_Check; a cast is looked at as it comes in)
+		KickVote_Check(ri);
+
 		// contested touches whose wait is up (WeaponHold_*)
 		WeaponHold_Tick(ri);
 
@@ -3576,14 +4711,39 @@ void ServerState_Tick()
 
 		// The room list says whether this room can be joined, and that can
 		// change on its own as a clock runs down (RoomOpenForJoin): push a
-		// fresh list to everybody the moment it does.
+		// fresh list to everybody the moment it does. Likewise whether its
+		// race can be watched (1110, RoomOpenForSpectate): a round's green,
+		// the close before the forced return, a seat given or freed.
 		{
 			char closed = !RoomOpenForJoin(ri);
-			if (closed != ri->boolJoinClosed)
+			char watch = (char)RoomOpenForSpectate(ri);
+			if (closed != ri->boolJoinClosed || watch != ri->boolSpectateOpen)
 			{
 				ri->boolJoinClosed = closed;
+				ri->boolSpectateOpen = watch;
 				ForeachPeerLPL(SendRoomData);
 			}
+		}
+
+		// A spectator still held SPECTATE_LOAD_SECONDS after it sat down
+		// (1110, SV_config.h): its name never came, or its load never ended.
+		// Removed as an idle player is, once; its leave is silent, as every
+		// spectator's (ProcessDisconnectEvent).
+		for (int j = 0; j < MAX_CLIENTS; j++)
+		{
+			PeerInfo* pi = &ri->peerInfos[j];
+			if (pi->peer == 0 || pi->spectator != 1 || pi->spectateAt == 0)
+				continue;
+			if ((int)(enet_time_get() - pi->spectateAt) < SPECTATE_LOAD_SECONDS * 1000)
+				continue;
+
+			pi->spectateAt = 0;
+			if (pi->peer->state != ENET_PEER_STATE_CONNECTED)
+				continue;
+			PrintPrefix(r + 1);
+			printf("Spectator %.*s (%d) did not reach the race in %ds, removed\n",
+				NAME_LEN, &pi->name[0], j, SPECTATE_LOAD_SECONDS);
+			enet_peer_disconnect(pi->peer, DISCONNECT_REASON_IDLE);
 		}
 
 		// Lobby idle clocks (IdleRun): a running clock out of budget, out of
@@ -3630,25 +4790,55 @@ void ServerState_Tick()
 			if (ri->boolLoadAll)
 			{
 				// a new race: no weapon of the last one is known (the
-				// clients clear theirs at this message too), nor any mask
+				// clients clear theirs at this message too), nor any mask,
+				// TURBO or Saffi - and no vote to kick stands: the votes are
+				// the lobby's (KickVote_*), the clients clear theirs at this
+				// message too, and the next lobby starts with none
+				int kickWiped = 0;
 				memset(ri->weaponFate, 0, sizeof(ri->weaponFate));
 				memset(ri->weaponHolds, 0, sizeof(ri->weaponHolds));
 				for (int k = 0; k < MAX_CLIENTS; k++)
 				{
 					ri->peerInfos[k].maskShotAt = 0;
+					ri->peerInfos[k].saffiSeenAt = 0;
+					ri->peerInfos[k].turboShotAt = 0;
 					ri->peerInfos[k].shieldClaim = 0;
 					ri->peerInfos[k].shieldSerial = SHIELD_SERIAL_NONE;
 					memset(ri->peerInfos[k].claimAt, 0, sizeof(ri->peerInfos[k].claimAt));
+					for (unsigned m = ri->peerInfos[k].kickVotes; m != 0; m &= m - 1)
+						kickWiped++;
+					ri->peerInfos[k].kickVotes = 0;
+				}
+				if (kickVoteLog)
+				{
+					PrintPrefix(r + 1);
+					printf("Kick votes (--kicklog): %d wiped at the countdown\n", kickWiped);
+				}
+
+				// The race as a spectator will join it (1110, Spectator_*):
+				// the seats racing - none other is ever given to one - and
+				// nothing of it yet, no finish and no kart message.
+				ri->raceSeats = 0;
+				ri->endCount = 0;
+				for (int k = 0; k < MAX_CLIENTS; k++)
+				{
+					if (ri->peerInfos[k].peer != 0)
+						ri->raceSeats |= (unsigned short)(1u << k);
+					ri->peerInfos[k].endOrder = 0;
+					ri->peerInfos[k].endFlags = 0;
+					ri->peerInfos[k].hasLastKart = 0;
 				}
 
 				// send to all clients, the game modes' round seated now
 				// (Round_Begin) and its code in the header's spare nibble -
 				// set in every room, 0 for no round. It went out uninitialised
 				// before the modes, which is why the client reads it in a
-				// mode room only.
+				// mode room only. The code is kept for a spectator's own
+				// SG_STARTLOADING (roundCode, 1110).
 				struct SG_Header sg;
+				ri->roundCode = (unsigned char)(Round_Begin(ri) & 0xF);
 				sg.type = SG_STARTLOADING;
-				sg.padding = Round_Begin(ri) & 0xF;
+				sg.padding = ri->roundCode;
 				broadcastToPeersReliable(ri, &sg, sizeof(struct SG_Header));
 
 				// the load's clock (LOAD_TIMEOUT_SECONDS, below)
@@ -3731,7 +4921,7 @@ void ServerState_Tick()
 				// Replaces the LOBBY_RETURN clock on every client.
 				struct SG_MessageLobbyCountdown sg;
 				sg.type    = SG_LOBBYCOUNTDOWN;
-				sg.padding = 0;
+				sg.kind    = LOBBYCOUNT_CLOCK;
 				sg.seconds = RACE_OVER_COUNTDOWN_SECONDS;
 				broadcastToPeersReliable(ri, &sg, sizeof(struct SG_MessageLobbyCountdown));
 			}
