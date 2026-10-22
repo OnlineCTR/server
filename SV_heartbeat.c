@@ -25,7 +25,7 @@
 
 #include <curl/curl.h>
 
-#ifdef __WINDOWS__
+#ifdef _WIN32
 	#include <windows.h>
 	typedef CRITICAL_SECTION octr_mutex;
 	#define MUTEX_INIT(m)    InitializeCriticalSection(m)
@@ -490,7 +490,7 @@ static void post_once(void)
 	curl_easy_cleanup(curl);
 }
 
-#ifdef __WINDOWS__
+#ifdef _WIN32
 static DWORD WINAPI worker(LPVOID arg)
 #else
 static void* worker(void* arg)
@@ -517,7 +517,7 @@ static void* worker(void* arg)
 		post_once();
 		SLEEP_SEC(g_intervalSec);
 	}
-#ifdef __WINDOWS__
+#ifdef _WIN32
 	return 0;
 #else
 	return NULL;
@@ -575,7 +575,7 @@ int Heartbeat_Init(void)
 
 	g_running = 1;
 
-#ifdef __WINDOWS__
+#ifdef _WIN32
 	{
 		HANDLE h = CreateThread(NULL, 0, worker, NULL, 0, NULL);
 		if (h == NULL)
@@ -613,7 +613,7 @@ int Heartbeat_Init(void)
 	PrintPrefix(-1);
 	printf("Heartbeat: Player seen hashes are keyed with %s\n", g_seenKey[0]
 		? "OCTR_HEARTBEAT_SEEN_KEY (shared where a player is one hash across servers)"
-		: "This server's secret (set OCTR_HEARTBEAT_SEEN_KEY on every server to de-duplicate across them)\n");
+		: "This server's secret (set OCTR_HEARTBEAT_SEEN_KEY on every server to de-duplicate across them)");
 
 	return 1;
 }

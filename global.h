@@ -25,8 +25,8 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1111
-#define SERVER_VERSION 1111
+#define VERSION 1113
+#define SERVER_VERSION 1113
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
 // defined before it includes this header; 1111). One from another release
@@ -110,7 +110,7 @@
 // the line or out (Matt, 1111); the room list's racingMask (ROOM_RACING), a
 // room in a race from its load to its reset, which opens RACE IN PROGRESS
 // before the race can be watched; and a plain race watched from its green,
-// not its lights (the server's raceGreenAt; Matt, 1111: JOIN ROOM greyed
+// not its lights (the server's raceGreenAt; Matt, 1111: SPECTATE greyed
 // until the green).
 #define NET_SPECTATE 2
 
@@ -298,11 +298,11 @@
 // was +8 on the count. ROOM_SPECTATE (1110), the char's last bit, unused
 // before: the race in it can be watched now - past its green, not over,
 // with a seat that was empty at its load (RoomOpenForSpectate, SV_main.c;
-// SG_MessageRooms.spectateMask) - RACE IN PROGRESS's JOIN ROOM lit
+// SG_MessageRooms.spectateMask) - RACE IN PROGRESS's SPECTATE lit
 // (hostOptions.c). ROOM_RACING (1111; the count's sixth bit before, always
 // 0): the room is in a race - loading, at the start line, racing or on its
 // results (RoomInRace, SV_main.c; SG_MessageRooms.racingMask) - and CROSS
-// on its row, if it cannot be joined, opens RACE IN PROGRESS, JOIN ROOM
+// on its row, if it cannot be joined, opens RACE IN PROGRESS, SPECTATE
 // greyed until the green (Matt, 1111). ROOM_IN_RACE takes either bit, should
 // a server ever send ROOM_SPECTATE alone: the same single andi as one bit's
 // test. Every reader of the count masks the flags out (ROOM_PLAYERS,
@@ -319,15 +319,28 @@
 #define OCTR_STR(x)  OCTR_STR2(x)
 
 // octr->menuMusic, the launcher's Menu Theme Music as the client hands it
-// on: off, the menu's own theme, or MENU_MUSIC_RANDOM + a race track's
-// levelID, the client's pick, whose song the lobby then plays (its bank
-// levelID + 1, its song levelID: data.levBank_FX, levBank_Song). The ROM
-// before Random only tested it against 0, so any pick plays the theme there.
-#define MENU_MUSIC_OFF     0
-#define MENU_MUSIC_DEFAULT 1
-#define MENU_MUSIC_RANDOM  2
-#define MENU_MUSIC_TRACKS  18                  // the picks the ROM takes: the race tracks, to TURBO_TRACK
-#define MENU_MUSIC_BANK    0x20                // the menu theme's own bank (Music_AsyncParseBanks)
+// on: off, the menu's own theme, or MENU_MUSIC_RANDOM + the client's pick,
+// whose song the lobby then plays: a race track's levelID (its bank levelID
+// + 1, its song levelID: data.levBank_FX, levBank_Song), an adventure hub's
+// levelID (1113: the hubs' bank and song, with that hub's parts only -
+// advHubSongSet, as the hub itself plays it), or MENU_MUSIC_BOSS_PICK (1113:
+// the boss races' song over Ripper Roo's boss bank). Matt, 1113: "all the
+// adventure mode music" - the five hub versions and the boss race song. The
+// ROM before Random only tested it against 0, so any pick plays the theme
+// there; one before 1113 plays the theme for a hub or the boss. Plain
+// numbers: the client and the server build with this header too.
+#define MENU_MUSIC_OFF        0
+#define MENU_MUSIC_DEFAULT    1
+#define MENU_MUSIC_RANDOM     2
+#define MENU_MUSIC_TRACKS     18     // the race tracks, to TURBO_TRACK (the client's bank range)
+#define MENU_MUSIC_HUB_PICK   25     // GEM_STONE_VALLEY: the hubs are picks 25-29 by levelID, hub = pick - 25
+#define MENU_MUSIC_HUBS       5      // to CITADEL_CITY: advHubSongSet's bits 0x01-0x10, a hub's
+#define MENU_MUSIC_BOSS_PICK  30     // no level of its own: its bank put in by Music_AsyncParseBanks itself
+#define MENU_MUSIC_SONG_BANKS 0x1A   // banks 1-0x1A: bank b's song is b - 1 (tracks, arenas, the boss bank's 0x19)
+#define MENU_MUSIC_HUB_BANK   0x1F   // the five hubs' bank (data.levBank_FX[25-29])
+#define MENU_MUSIC_HUB_SONG   0x1A   // their song: 20 parts, advHubSongSet.numSeqs
+#define MENU_MUSIC_BOSS_BANK  0x1A   // Ripper Roo's: the boss song's samples are the same in banks 0x1A-0x1E
+#define MENU_MUSIC_BANK       0x20   // the menu theme's own bank (Music_AsyncParseBanks)
 
  // 2 seconds to be very tolerant on client
 #ifdef USE_60FPS
@@ -834,6 +847,7 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define LOBBY_VIEW_SERVERS 1
 #define LOBBY_VIEW_QUICK   2
 #define LOBBY_VIEW_NOGAMES 3   // QUICK PLAY with nobody online: NO GAMES AVAILABLE, START ONE?
+#define LOBBY_VIEW_SERVERS_OUT 4   // (1113) the region list on its way down after TRIANGLE, the logo going back; then the home box in (home.c)
 
 // octr->quickPlayCmd, the ROM to the client
 #define QP_CMD_NONE   0
@@ -1010,15 +1024,23 @@ STATIC_ASSERT2(MAX_NUM_PLAYERS <= 16, "kick votes: a 16-bit mask a voter");
 // (VehLap_UpdateProgress's % takes it under 0 just past a node; a track is at
 // most 8 * 0xFFFF, the restart points' unsigned short, so 20 bits hold it),
 // 20 the behind-the-line flag (actionsFlagSet 0x1000000), 21-27 lapIndex
-// (to TAG_LAPS), 31 a word is in (0: none yet). One aligned word, written in
-// one store and read in one load each way, so a lap is never paired with
-// another step's progress: at the line that would be a whole lap out.
+// (to TAG_LAPS), 28-30 the kart's voice toggles (1113, netLap.c), 31 a word
+// is in (0: none yet). One aligned word, written in one store and read in one
+// load each way, so a lap is never paired with another step's progress: at
+// the line that would be a whole lap out.
+//   Bits 28-30 are fixed for as long as SERVER_VERSION is 1111: a 1113 ROM
+// plays any change in them as a voice line, so any other use needs a
+// SERVER_VERSION bump, which keeps 1113 players out of those rooms. (The
+// v1111 server copies the word whole, unread; 1111/1112 readers mask the bits
+// off: NET_LAP_LAP is 7 bits, NET_LAP_DIST 20, and nothing reads 28-30.)
 #define NET_LAP_IN     0x80000000u
 #define NET_LAP_BEHIND 0x00100000u
 #define NET_LAP_PACK(lap, behind, dist) (NET_LAP_IN | (((unsigned int)(lap) & 0x7fu) << 21) | \
 	((behind) ? NET_LAP_BEHIND : 0u) | ((unsigned int)(dist) & 0xfffffu))
 #define NET_LAP_LAP(w)  ((int)(((w) >> 21) & 0x7f))
 #define NET_LAP_DIST(w) (((int)((w) << 12)) >> 12)
+#define NET_LAP_VOICE_SHIFT 28   // 28 jump line (7), 29 turbo whoop (16), 30 drift spin-out (3): each flips when the kart's own game says it (1113, netLap.c)
+#define NET_LAP_VOICES(w)   (((w) >> NET_LAP_VOICE_SHIFT) & 7u)
 // The words, one a kart slot, in the game tracker's free 2P-4P pixel-LOD
 // area (include/common.h): slot 0 this machine's kart's, written by the ROM
 // each race step (NetLap_Step) for the client to send (CG_RACEDATA's lap);
@@ -1080,6 +1102,15 @@ void EndOfRace_Icons();
 extern int currCam;
 int Spectate_IsRacing(int driverID);
 int Spectate_NextRacer();
+// With nobody racing, the next player in the room as RIGHT takes it (1112:
+// the spectator joiner's wait, spectate.c, never left on the hidden kart).
+void Spectate_AnyKart(void);
+
+// The kernel guard (kernelGuard.c, ModsC, 1112): installed once from this
+// block's first frame (Online_ThreadStart), drawn on the crash screen
+// (CrashScreen_Extra).
+void KernelGuard_Install(void);
+void KernelGuard_DrawRows(void);
 
 // The spectator who joined a race in progress (spectate.c, 1110), each race
 // step after NetWeapons_Step (Online_RemoteEngines, engineAudio.c): while

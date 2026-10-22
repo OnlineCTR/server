@@ -4,7 +4,10 @@
 // version 3 (LICENSE), with the additional terms in ADDITIONAL-TERMS under
 // its section 7. It comes with ABSOLUTELY NO WARRANTY.
 
-#ifdef __WINDOWS__
+// Windows - Visual Studio and MinGW alike: _WIN32, which both define, not
+// __WINDOWS__, which only Server.vcxproj does. Everything Windows-specific in
+// the server keys on it, so a MinGW build gets the same Windows behaviour.
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
@@ -17,11 +20,12 @@
 #include <time.h>
 #include <signal.h>
 #include <errno.h> // why a port could not be opened (PrintPortTrouble)
-#ifndef __WINDOWS__
+#ifndef _WIN32
 #include <unistd.h> // _exit
 #endif
 #include <enet/enet.h>
-#include "malloc.h"
+// (malloc and free come from <stdlib.h>, above: <malloc.h> is glibc's and
+// MSVC's only - macOS has none, and a build there stopped at it)
 
 // Shared protocol header: the global.h next to these sources (the release
 // zip ships it; CMakeLists.txt and Server.vcxproj add no other include path
@@ -35,7 +39,7 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1111
+#define SV_PROTOCOL 1113
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
@@ -97,7 +101,9 @@
 
 #include "SV_heartbeat.h"
 
+#ifdef _MSC_VER
 #pragma comment (lib, "Ws2_32.lib")
+#endif
 
 // A room's seats: MAX_NUM_PLAYERS (global.h), the ROM's and the client's.
 #define MAX_CLIENTS MAX_NUM_PLAYERS
@@ -108,13 +114,8 @@
 // SV_config.h.
 
 
-#ifdef __WINDOWS__
-#define CLOCKS_PER_SEC_FIX CLOCKS_PER_SEC
-#else
-#define CLOCKS_PER_SEC_FIX ((clock_t)100000) // Original value (1000000), I removed one zero
-#endif
-
 //SV_helper.c forward decls
+void SleepMicro(long long usec);
 void PrintTime();
 //int GetWeekDay(); //not used currently
 void AddPeerLPL(ENetPeer* peer);
@@ -248,9 +249,10 @@ typedef struct
 	char boolRaceAll;
 	char boolEndAll;
 
-	// What SendRoomData last said about joining, so ServerState_Tick can
-	// push a fresh room list the moment it changes (a clock crossing the
-	// close line, and back when the player it belonged to is gone).
+	// What SendRoomData last said about joining, so ServerState_Tick can mark
+	// the room list for its next push (RoomList_Dirty, RoomList_Flush) once
+	// it changes (a clock crossing the close line, and back when the player
+	// it belonged to is gone).
 	char boolJoinClosed;
 
 	// ...and whether it said the race in it can be watched (1110,
@@ -383,7 +385,7 @@ typedef struct
 
 ENetHost* server;
 
-RoomInfo roomInfos[16] = { NULL };
+RoomInfo roomInfos[16] = { 0 };   // { 0 }, not { NULL }: clang's -Wall wants braces round a NULL that fills a nested member
 
 // Defined with the idle clock helpers further down; the room list needs it.
 static int RoomOpenForJoin(RoomInfo* ri);
@@ -726,6 +728,165 @@ static int OctrQuery_Intercept(ENetHost* host, ENetEvent* event)
 	b.dataLength = sizeof(r);
 	enet_socket_send(host->socket, &host->receivedAddress, &b, 1);
 	return 1;
+}
+
+// ---------------------------------------------------------- the room list
+//
+// The room list (SendRoomData) goes to every connection on the server when a
+// room changes: a join, a leave, a track picked or cancelled, a race's load,
+// start or end, a kick's end. Each change marks the list dirty, and the tick
+// sends it once, at the end of its pass (RoomList_Flush) - and no sooner
+// than ROOM_LIST_MIN_MS after the last (SV_config.h): a host toggling the
+// track pick would otherwise have a list sent to everybody for every toggle.
+// A joiner is still sent its own list at once (CG_JOINROOM), ahead of its
+// welcome, as before.
+static int g_roomListDirty = 0;
+static enet_uint32 g_roomListSentAt = 0;
+
+static void RoomList_Dirty(void)
+{
+	g_roomListDirty = 1;
+}
+
+static void RoomList_Flush(void)
+{
+	enet_uint32 now = enet_time_get();
+
+	if (!g_roomListDirty)
+		return;
+	if (g_roomListSentAt != 0 && (enet_uint32)(now - g_roomListSentAt) < ROOM_LIST_MIN_MS)
+		return;
+	g_roomListDirty = 0;
+	g_roomListSentAt = now ? now : 1;
+	ForeachPeerLPL(SendRoomData);
+}
+
+// ------------------------------------------------------------- rate limits
+//
+// What one connection may send (SV_config.h), by kind: the kart message
+// (RATE_KART_*: a client sends 30 a second, 60 with the 60 FPS disc), the
+// weapon messages (RATE_EVENT_*: they come in bursts) and everything else
+// (RATE_LOBBY_*: a join, a name, a pick, a vote...). Every message is
+// counted before anything else is made of it: an empty one, or one of a
+// type no client sends, as the lobby's; any other by its type, short or not.
+// A bucket of tokens for each kind: PER_SEC is its refill a second, BURST
+// what it holds. Each message takes a token; one that finds none is dropped.
+//
+// A bucket rather than a count for each second: ENet holds a reliable
+// message behind an earlier one that was lost, and hands the whole run over
+// in one go when the lost one's resend lands - after a Wi-Fi stall of a
+// second or two, everything a player did in it arrives together. A plain
+// count kept the oldest of that run and dropped the newest, which could be
+// the character pick's lock-in, sent once and never again: the room would
+// wait on it until that player was removed for idling. The bursts hold any
+// backlog a stall short of ENet's 5 s timeout can build (about 90 lobby
+// messages at the fastest a player can press), and still empty in a moment
+// under a flood. A connection with FLOOD_DROPS_PER_SEC dropped in one
+// counted second - one that starts at its first drop after the last such
+// second ended, so a burst across two of them can reach about twice that -
+// is a flood, not a player: disconnected, and the log says so. A steady
+// flood is caught within its first second or two either way.
+//
+// Kept by ENet's index for the connection, so one on the room list is held
+// to it as one in a room is; filled as each connection is made (CONNECT).
+enum { RATE_KART, RATE_EVENT, RATE_LOBBY, RATE_KINDS };
+
+typedef struct
+{
+	unsigned int milli[RATE_KINDS];    // tokens left, by kind, in thousandths
+	enet_uint32 refillAt;              // enet_time_get() of the last refill
+	enet_uint32 dropAt;                // when the current counted second of drops began
+	unsigned short dropped;            // dropped in that counted second
+	unsigned char flooded;             // disconnected for it: nothing more taken
+} PeerRate;
+
+static PeerRate peerRates[MAX_PEERS];
+static const unsigned int rateRefill[RATE_KINDS] = { RATE_KART_PER_SEC, RATE_EVENT_PER_SEC, RATE_LOBBY_PER_SEC };
+static const unsigned int rateBurst[RATE_KINDS] = { RATE_KART_BURST, RATE_EVENT_BURST, RATE_LOBBY_BURST };
+
+STATIC_ASSERT2(MAX_PEERS >= 16 * MAX_CLIENTS, "MAX_PEERS: fewer connections than seats");
+STATIC_ASSERT2(MAX_PEERS <= ENET_PROTOCOL_MAXIMUM_PEER_ID, "MAX_PEERS: past ENet's ceiling");
+STATIC_ASSERT2(RATE_KART_BURST >= RATE_KART_PER_SEC && RATE_EVENT_BURST >= RATE_EVENT_PER_SEC &&
+	RATE_LOBBY_BURST >= RATE_LOBBY_PER_SEC, "RATE_*_BURST: a bucket holds at least a second's refill");
+STATIC_ASSERT2(RATE_KART_BURST <= 1000000 && RATE_EVENT_BURST <= 1000000 && RATE_LOBBY_BURST <= 1000000,
+	"RATE_*_BURST: in thousandths, a bucket must fit an unsigned int");
+STATIC_ASSERT2(RATE_KART_PER_SEC >= 1 && RATE_EVENT_PER_SEC >= 1 && RATE_LOBBY_PER_SEC >= 1,
+	"RATE_*_PER_SEC: at least 1 (0 is not 'off': it would divide by zero at the refill)");
+STATIC_ASSERT2(FLOOD_DROPS_PER_SEC >= 1 && FLOOD_DROPS_PER_SEC <= 65535,
+	"FLOOD_DROPS_PER_SEC: 1 to 65535 (PeerRate.dropped is an unsigned short)");
+
+static int Rate_Kind(int type)
+{
+	switch (type)
+	{
+		case CG_RACEDATA:    return RATE_KART;
+		case CG_WEAPON:
+		case CG_WEAPONEVENT: return RATE_EVENT;
+		default:             return RATE_LOBBY;
+	}
+}
+
+// A new connection in this slot (CONNECT): its buckets full, nothing dropped.
+static void Rate_Reset(ENetPeer* peer)
+{
+	PeerRate* r = &peerRates[peer - server->peers];
+	memset(r, 0, sizeof(PeerRate));
+	for (int k = 0; k < RATE_KINDS; k++)
+		r->milli[k] = rateBurst[k] * 1000u;
+	r->refillAt = enet_time_get();
+	r->dropAt = r->refillAt;
+}
+
+// 1: the message is taken. 0: dropped, its kind's bucket empty. type is the
+// message's type, or -1 for an empty one (counted as the lobby's).
+static int Rate_Take(ENetPeer* peer, int type)
+{
+	PeerRate* r = &peerRates[peer - server->peers];
+	enet_uint32 now = enet_time_get();
+	enet_uint32 elapsed = now - r->refillAt;
+	int kind = Rate_Kind(type);
+
+	if (r->flooded)
+		return 0;
+
+	// refill every bucket for the time since the last message, a token a
+	// thousandth at a time: rate a second is rate thousandths a millisecond
+	if (elapsed > 0)
+	{
+		r->refillAt = now;
+		for (int k = 0; k < RATE_KINDS; k++)
+		{
+			unsigned int cap = rateBurst[k] * 1000u;
+			unsigned int room = cap - r->milli[k];
+			if (elapsed >= room / rateRefill[k] + 1)
+				r->milli[k] = cap;
+			else
+				r->milli[k] += elapsed * rateRefill[k];
+			if (r->milli[k] > cap)
+				r->milli[k] = cap;
+		}
+	}
+
+	if (r->milli[kind] >= 1000)
+	{
+		r->milli[kind] -= 1000;
+		return 1;
+	}
+
+	if ((enet_uint32)(now - r->dropAt) >= 1000)
+	{
+		r->dropAt = now;
+		r->dropped = 0;
+	}
+	if (++r->dropped >= FLOOD_DROPS_PER_SEC)
+	{
+		r->flooded = 1;
+		PrintPrefix(-1);
+		printf("Connection [%08x] sent %u messages over its limits in a second: disconnected as a flood\n",
+			peer->address.host, (unsigned)r->dropped);
+		enet_peer_disconnect(peer, 0);
+	}
+	return 0;
 }
 
 void GetDriverFromRace(ENetPeer* peer, RoomInfo** ri, int* peerID)
@@ -1164,10 +1325,11 @@ static int RoomInRace(RoomInfo* ri)
 }
 
 // What the room list says of this room (SendRoomData), as it was last
-// pushed for a change of its own (ServerState_Tick; ResetRoomAfterRace):
-// whether it can be joined, whether its race can be watched, whether it is
-// in a race (1111). 1 if any of the three moved since, the record brought up
-// to date - and the list is the caller's to push.
+// marked for a push for a change of its own (ServerState_Tick;
+// ResetRoomAfterRace): whether it can be joined, whether its race can be
+// watched, whether it is in a race (1111). 1 if any of the three moved
+// since, the record brought up to date - and the list is the caller's to
+// mark (RoomList_Dirty).
 static int RoomList_Changed(RoomInfo* ri)
 {
 	char closed = (char)!RoomOpenForJoin(ri);
@@ -1269,7 +1431,7 @@ static void Room_TrackIn(RoomInfo* ri, int trackID, int lapID, int voted)
 	}
 
 	broadcastToPeersReliable(ri, &s, sizeof(struct SG_MessageTrack));
-	ForeachPeerLPL(SendRoomData);
+	RoomList_Dirty();
 
 	// Track and laps are in: the host's clock simply runs on into the
 	// character pick, and every guest's starts - or resumes, after a
@@ -2448,7 +2610,7 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 		// the racer it watched is Watch_Leave's, above (1111).
 		if (ri->peerInfos[peerID].boolEndSelf != 0 || ri->peerInfos[peerID].spectator != 0)
 		{
-			ForeachPeerLPL(SendRoomData);
+			RoomList_Dirty();
 			return;
 		}
 
@@ -2480,7 +2642,7 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 	if (!killLobby && ri->votePhase != VOTE_NONE)
 		Vote_Broadcast(ri);
 
-	ForeachPeerLPL(SendRoomData); //someone left a room, notify everyone else.
+	RoomList_Dirty();   // someone left a room: everybody's list (RoomList_Flush)
 }
 
 // special: 0, or NEWCLIENT_SPECTATOR (1110) for a seat taken to watch the
@@ -2855,7 +3017,7 @@ static void Spectator_Join(RoomInfo* ri, ENetPeer* peer)
 	st.lapID = ri->lapPlayed;
 	sendToPeerReliable(peer, &st, sizeof(struct SG_MessageTrack));
 
-	ForeachPeerLPL(SendRoomData); //someone chose a room, notify everyone else.
+	RoomList_Dirty();   // someone chose a room: everybody's list, after the welcome above (RoomList_Flush)
 
 	PrintPrefix((int)(ri - roomInfos) + 1);
 	printf("Player %d joined room %d as a spectator\n", id, (int)(ri - roomInfos) + 1);
@@ -3150,13 +3312,51 @@ STATIC_ASSERT2(sizeof(struct SG_MessageEndRace) <= SG_BUFFER_BYTES, "sgBuffer: S
 STATIC_ASSERT2(sizeof(struct SG_MessageName) <= SG_BUFFER_BYTES, "sgBuffer: SG_MessageName");
 STATIC_ASSERT2(sizeof(struct SG_MessageCharacter) <= SG_BUFFER_BYTES, "sgBuffer: SG_MessageCharacter");
 
+// ...and every message, either way, fits the packet ENet is allowed
+// (MAX_PACKET_BYTES, SV_config.h): one that outgrows it fails here, not on
+// the wire, where ENet would drop it without a word.
+STATIC_ASSERT2(sizeof(struct SG_MessageRooms) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageRooms");
+STATIC_ASSERT2(sizeof(struct SG_MessageVote) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageVote");
+STATIC_ASSERT2(sizeof(struct SG_MessageKickVote) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageKickVote");
+STATIC_ASSERT2(sizeof(struct SG_MessageClientStatus) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageClientStatus");
+STATIC_ASSERT2(sizeof(struct SG_MessageName) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageName");
+STATIC_ASSERT2(sizeof(struct SG_MessageTrack) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageTrack");
+STATIC_ASSERT2(sizeof(struct SG_MessageCharacter) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageCharacter");
+STATIC_ASSERT2(sizeof(struct SG_EverythingKart) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_EverythingKart");
+STATIC_ASSERT2(sizeof(struct SG_MessageWeapon) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageWeapon");
+STATIC_ASSERT2(sizeof(struct SG_MessageWeaponEvent) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageWeaponEvent");
+STATIC_ASSERT2(sizeof(struct SG_MessageEndRace) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageEndRace");
+STATIC_ASSERT2(sizeof(struct SG_MessageLobbyCountdown) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageLobbyCountdown");
+STATIC_ASSERT2(sizeof(struct SG_MessageIdleCountdown) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageIdleCountdown");
+STATIC_ASSERT2(sizeof(struct SG_MessageHost) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_MessageHost");
+STATIC_ASSERT2(sizeof(struct SG_Header) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: SG_Header");
+STATIC_ASSERT2(sizeof(struct CG_MessageRoom) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageRoom");
+STATIC_ASSERT2(sizeof(struct CG_MessageName) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageName");
+STATIC_ASSERT2(sizeof(struct CG_MessageTrack) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageTrack");
+STATIC_ASSERT2(sizeof(struct CG_MessageCharacter) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageCharacter");
+STATIC_ASSERT2(sizeof(struct CG_EverythingKart) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_EverythingKart");
+STATIC_ASSERT2(sizeof(struct CG_MessageWeapon) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageWeapon");
+STATIC_ASSERT2(sizeof(struct CG_MessageWeaponEvent) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageWeaponEvent");
+STATIC_ASSERT2(sizeof(struct CG_MessageHostAction) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageHostAction");
+STATIC_ASSERT2(sizeof(struct CG_MessageVote) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageVote");
+STATIC_ASSERT2(sizeof(struct CG_MessageEndRace) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageEndRace");
+STATIC_ASSERT2(sizeof(struct CG_MessageWatch) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageWatch");
+
 void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 	int peerID = -1;
 
 	RoomInfo* ri = &roomInfos[0];
 
-	// Length before anything else looks at the payload.
+	// Its sender's bucket first (Rate_Take): past it, dropped. Every message
+	// counts, a malformed one too - an empty one or one of a type no client
+	// sends as the lobby's, any other by its type nibble, short or not - so a
+	// flood of malformed ones is cut off as any other is. Only the type
+	// nibble is read here, and only from a message with a byte in it.
+	if (!Rate_Take(peer, packet->dataLength ? ((struct CG_Header*)packet->data)->type : -1))
+		return;
+
+	// Length before anything past the type nibble is read.
 	if (packet->dataLength < sizeof(struct CG_Header))
 		return;
 	if (packet->dataLength < MinPacketSize(((struct CG_Header*)packet->data)->type))
@@ -3312,7 +3512,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// last player's went with them (KickVote_Forget)
 			KickVote_Forget(ri, id);
 
-			ForeachPeerLPL(SendRoomData); //someone chose a room, notify everyone else.
+			// the joiner's own list at once, ahead of its welcome, as it always
+			// was; everybody else's at the tick's end (RoomList_Flush)
+			SendRoomData(peer);
+			RoomList_Dirty();
 
 			// 5 seconds
 			enet_peer_timeout(peer, 1000000, 1000000, 5000);
@@ -3516,14 +3719,16 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				int trackID = r->trackID;
 				int lapID = r->lapID;
 
-				// The game modes' rooms race the race tracks only - the ROM's
-				// list and the vote offer nothing else (NUM_TRACKS, menu.c;
-				// VOTE_TRACKS) - but trackID is five bits, so a modified
-				// client could ask for an arena, where a round would meet
-				// battle rules (the invincibility after a blast), no laps, and
-				// ProcessDisconnectEvent's arena kill. Clamped rather than
-				// refused, for the reason above: a refusal strands the host.
-				if (ROOM_IS_MODE((int)(ri - roomInfos)) && trackID >= VOTE_TRACKS)
+				// Every room races the race tracks only - the ROM's list and
+				// the vote offer nothing else (NUM_TRACKS, menu.c; VOTE_TRACKS)
+				// - but trackID is five bits, so a modified client could ask
+				// for an arena or a hub level. In a mode room a round would
+				// meet battle rules (the invincibility after a blast), no laps,
+				// and ProcessDisconnectEvent's arena kill; in any room it is a
+				// level nobody picked, loaded on every machine in the room.
+				// Clamped rather than refused, for the reason above: a refusal
+				// strands the host. (Mode rooms alone up to 1111.)
+				if (trackID >= VOTE_TRACKS)
 					trackID = VOTE_TRACKS - 1;
 
 				// ELIMINATION and TAG have no lap pick (Room_NoLapPick): row 0,
@@ -3616,7 +3821,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				ArmHostIdle(ri);
 
 			// Open again, so the room list shows it that way.
-			ForeachPeerLPL(SendRoomData);
+			RoomList_Dirty();
 			break;
 		}
 
@@ -3845,6 +4050,13 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 		{
 			struct SG_EverythingKart* s = (struct SG_EverythingKart*)&sgBuffer[0];
 			struct CG_EverythingKart* r = (struct CG_EverythingKart*)recvBuf;
+
+			// a race's message: from the room's load (SG_STARTLOADING) to its
+			// reset. In the lobby there is no kart to move, and a client that
+			// sent them there could flood the room's other players through the
+			// relay below (unreliable, a copy to each). The client sends them
+			// in its race states alone (SendKartMessage, CL_main.cpp).
+			if (!ri->boolLoadAll) break;
 
 			s->type = SG_RACEDATA;
 			s->clientID = peerID;
@@ -4174,17 +4386,24 @@ void ProcessNewMessages() {
 				} ipBytes;
 				ipBytes.ip = ip;
 
+				// a new connection in this slot: its buckets full again
+				// (Rate_*), whatever becomes of it below
+				Rate_Reset(event.peer);
+
 				if (AnyMatchIPBanL(ip)) //if this IP is banned
 				{
 					PrintPrefix(-1);
 					printf("Banned player @ IP [%d.%d.%d.%d] attempted to connect, rejected\n", ipBytes.bytes[0], ipBytes.bytes[1], ipBytes.bytes[2], ipBytes.bytes[3]);
 					enet_peer_disconnect_now(event.peer, 0);
 				}
-				// One address cannot hold the whole server: the host has 256
-				// peer slots and a single client that opened connections and
-				// kept them alive could sit on all of them, room or no room.
-				// Sixteen leaves plenty for a household or a LAN behind one NAT
-				// (two full rooms) while making that pointless.
+				// One address cannot hold the whole server: the host has
+				// MAX_PEERS slots, and a single client that opened connections
+				// and kept them alive could sit on all of them, room or no
+				// room. MAX_PEERS_PER_IP (12, SV_config.h) is a full room for a
+				// household or a LAN behind one NAT. This is the check that
+				// refuses a connection over it, at once, with the log line;
+				// ENet's own cap (duplicatePeers, one above, set at start-up)
+				// only stops any further half-open handshakes from the address.
 				else if (CountPeersLPL_FromHost(ip) >= MAX_PEERS_PER_IP)
 				{
 					PrintPrefix(-1);
@@ -4203,6 +4422,9 @@ void ProcessNewMessages() {
 
 			case ENET_EVENT_TYPE_DISCONNECT:
 				ProcessDisconnectEvent(event.peer);
+				break;
+
+			case ENET_EVENT_TYPE_NONE:
 				break;
 		}
 
@@ -4381,11 +4603,53 @@ static void PrintPortTrouble(int port)
 #endif
 }
 
+// The banlist's address: four numbers of 0 to 255, one to three digits each,
+// separated by dots - no signs, no spaces inside. The bytes in out, in the
+// order written (network order, as ENetAddress.host keeps them); *end just
+// past the last digit. 1 for an address, 0 for anything else.
+static int BanList_ParseIPv4(const char* s, unsigned char out[4], const char** end)
+{
+	for (int i = 0; i < 4; i++)
+	{
+		int v = 0, digits = 0;
+		if (i > 0)
+		{
+			if (*s != '.')
+				return 0;
+			s++;
+		}
+		while (*s >= '0' && *s <= '9')
+		{
+			v = v * 10 + (*s - '0');
+			if (++digits > 3)
+				return 0;
+			s++;
+		}
+		if (digits == 0 || v > 255)
+			return 0;
+		out[i] = (unsigned char)v;
+	}
+	*end = s;
+	return 1;
+}
+
+// What the rest of a banlist line is, from s: 1 nothing (spaces, tabs, the
+// '\r' of a CRLF file), 2 a '#' note, 0 anything else - a range's "/8", a
+// fifth number, a port - which makes the line no address at all.
+static int BanList_Rest(const char* s)
+{
+	while (*s == ' ' || *s == '\t' || *s == '\r')
+		s++;
+	if (*s == '\0')
+		return 1;
+	return *s == '#' ? 2 : 0;
+}
+
 void ServerState_FirstBoot(int argc, char** argv)
 {
 	PrintServerBanner();
 
-#ifdef __WINDOWS__
+#ifdef _WIN32
 	HWND console = GetConsoleWindow();
 	RECT r;
 	GetWindowRect(console, &r); //stores the console's current dimensions
@@ -4620,39 +4884,92 @@ void ServerState_FirstBoot(int argc, char** argv)
 		}
 	}
 
-	//read banlist file
+	// Read the banlist file: one IPv4 address a line. Blank lines and lines
+	// starting with '#' are ignored, and so is a '#' note after an address.
+	// Anything else is skipped with its line number in the log, never banned
+	// as something it is not: "10.0" used to ban 10.0.0.0, "300.1.1.1" wrapped
+	// to 44.1.1.1, and a range such as "10.0.0.0/8" would ban one address
+	// while looking like a whole network. Read a byte at a time, so that one
+	// line of the file is always one entry and one line number, however long
+	// it is and whatever is in it: the first 255 bytes are kept, the rest only
+	// looked at for text after an address, and a line holding a NUL byte is no
+	// address.
 	if (boolIsBanlistArgument)
 	{
 		FILE* fBanlistPtr = fopen(banlistPath, "r");
 		if (fBanlistPtr != NULL)
 		{
-			char lineBuf[100];
+			char lineBuf[256];
 			unsigned int lineNum = 1 /*1 based*/, banEntries = 0;
-			while (fgets(lineBuf, 100, fBanlistPtr))
+			for (;;)
 			{
 				union
 				{
 					unsigned int ip;
 					unsigned char bytes[4];
 				} ipBytes;
-				int ip[4] = { 0 };
-				if (lineBuf[0] == '\n' && lineBuf[1] == '\0') //empty line
-					;
-				else if (EOF == sscanf(lineBuf, "%d.%d.%d.%d", &ip[0], &ip[1], &ip[2], &ip[3]))
-					printf("Failiure to parse IPV4 address on line %d in 'banlist.txt'\n", lineNum);
+				const char* p = lineBuf;
+				const char* end = NULL;
+				size_t len = 0;
+				int c, any = 0, hasNul = 0;
+				int tailNote = 0, tailText = 0;   // past the kept bytes: a '#' note began, other text came first
+				int rest;
+
+				while ((c = getc(fBanlistPtr)) != EOF)
+				{
+					any = 1;
+					if (c == '\n')
+						break;
+					if (c == '\0')
+						hasNul = 1;
+					if (len < sizeof(lineBuf) - 1)
+						lineBuf[len++] = (char)c;
+					else if (!tailNote && !tailText)
+					{
+						if (c == '#')
+							tailNote = 1;
+						else if (c != ' ' && c != '\t' && c != '\r')
+							tailText = 1;
+					}
+				}
+				if (!any)
+					break;
+				lineBuf[len] = '\0';
+
+				if (lineNum == 1 && len >= 2 &&
+					(memcmp(lineBuf, "\xFF\xFE", 2) == 0 || memcmp(lineBuf, "\xFE\xFF", 2) == 0))
+				{
+					// UTF-16 (Notepad's "Unicode", PowerShell 5's '>'): every
+					// line would read as junk; said once, and nothing banned
+					printf("Banlist: '%s' is saved as UTF-16; save it as plain text or UTF-8\n", banlistPath);
+					break;
+				}
+
+				// a file saved as "UTF-8 with BOM" (Notepad, on older Windows)
+				if (lineNum == 1 && len >= 3 && memcmp(lineBuf, "\xEF\xBB\xBF", 3) == 0)
+					p += 3;
+				while (*p == ' ' || *p == '\t')
+					p++;
+
+				if (hasNul)
+					printf("Banlist: line %u of '%s' is not one IPv4 address, skipped\n", lineNum, banlistPath);
+				else if (*p == '#' || (BanList_Rest(p) == 1 && !tailText))
+					;   // a comment, or a blank line
+				else if (!BanList_ParseIPv4(p, ipBytes.bytes, &end) ||
+					(rest = BanList_Rest(end)) == 0 || (rest == 1 && tailText))
+					printf("Banlist: line %u of '%s' is not one IPv4 address, skipped\n", lineNum, banlistPath);
 				else
 				{
-					for (int i = 0; i < 4; i++)
-						ipBytes.bytes[i] = (unsigned char)ip[i];
 					AddIPBanL(ipBytes.ip);
 					banEntries++;
 				}
 				lineNum++;
 			}
-			printf("Banlist initialized with %d entries\n", banEntries);
+			fclose(fBanlistPtr);
+			printf("Banlist: %u entries from '%s'\n", banEntries, banlistPath);
 		}
 		else
-			printf("Unable to open 'banlist.txt'\n");
+			printf("Banlist: unable to open '%s'\n", banlistPath);
 	}
 
 	// the vote's draws (Vote_Finish), and TAG's "it" (Tag_NewIt)
@@ -4683,7 +5000,7 @@ void ServerState_FirstBoot(int argc, char** argv)
 		address.host = ENET_HOST_ANY;
 		address.port = port;
 		server = enet_host_create(&address,
-			16 * MAX_CLIENTS + 128	/* every seat in the 16 rooms, plus 128 on the room list */,
+			MAX_PEERS	/* every seat in the 16 rooms, and the rest on the room list (SV_config.h) */,
 			2	/* allow up to 2 channels to be used, 0 and 1 */,
 			0	/* assume any amount of incoming bandwidth */,
 			0	/* assume any amount of outgoing bandwidth */);
@@ -4699,6 +5016,23 @@ void ServerState_FirstBoot(int argc, char** argv)
 
 	// Quick Play's status query, answered ahead of ENet
 	server->intercept = OctrQuery_Intercept;
+
+	// What ENet may hold for one connection (SV_config.h). Its defaults are
+	// 32 MB each, sized for file transfers, and a fragmented packet is set
+	// aside in full at its first fragment: with them, any connection could
+	// have had the server allocate 32 MB for packets this game never sends.
+	// The largest message is 18 bytes (the asserts beside SG_BUFFER_BYTES).
+	server->maximumPacketSize = MAX_PACKET_BYTES;
+	server->maximumWaitingData = MAX_WAITING_BYTES;
+
+	// Connections from one address in any state, half-open handshakes
+	// included, which the CONNECT event's own count (CountPeersLPL_FromHost)
+	// never sees: ENet refuses past this at a handshake's first packet. One
+	// above MAX_PEERS_PER_IP, so a connection over the limit still completes
+	// and meets the CONNECT check, which refuses it at once with a log line -
+	// at MAX_PEERS_PER_IP itself ENet would refuse it silently, and the player
+	// would wait out their connect attempt instead of being told.
+	server->duplicatePeers = MAX_PEERS_PER_IP + 1;
 
 	PrintPrefix(-1);
 	printf("Ready on port %d\n", port);
@@ -4722,7 +5056,7 @@ void ServerState_FirstBoot(int argc, char** argv)
 
 // Snapshot the room occupancy for the heartbeat and hand it to the worker
 // thread. Rate limited to roughly once a second: the caller runs in a
-// usleep(1) loop, so publishing unconditionally would take the lock millions
+// SleepMicro(1) loop, so publishing unconditionally would take the lock millions
 // of times a second for data that is posted every 30.
 static void Heartbeat_Sample(void)
 {
@@ -4878,11 +5212,11 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 	// host whose welcome is pending, 1110: ArmHostIdle, Spectator_Welcome).
 	ArmHostIdle(ri);
 
-	// The list as it goes out now is the room's as the tick knows it (1111,
-	// RoomList_Changed): open again, no race - so the tick's own push, which
-	// runs after this in the same pass, does not send it a second time.
+	// The list as it goes out is the room's as the tick knows it (1111,
+	// RoomList_Changed: open again, no race); the push itself is the tick's,
+	// once for everything that changed in its pass (RoomList_Flush).
 	RoomList_Changed(ri);
-	ForeachPeerLPL(SendRoomData); //race over, re-notify all clients
+	RoomList_Dirty();   // race over: everybody's list
 }
 
 void ServerState_Tick()
@@ -4893,7 +5227,7 @@ void ServerState_Tick()
 
 	// a kick's time up: that room open to its player again on their list
 	if (KickBan_Expire())
-		ForeachPeerLPL(SendRoomData);
+		RoomList_Dirty();
 
 	for (int r = 0; r < 16; r++)
 	{
@@ -5120,9 +5454,9 @@ void ServerState_Tick()
 				printf("Race has terminated, resetting room in %ds\n", RACE_OVER_COUNTDOWN_SECONDS);
 
 				// Wall clock, not clock(): on Linux clock() is CPU time, and a
-				// process that spends its life in usleep() accrues it at some
-				// fraction of real time (the old "removed one zero" fudge in
-				// CLOCKS_PER_SEC_FIX papered over exactly that). The clients
+				// process that spends its life asleep accrues it at some
+				// fraction of real time (an old "removed one zero" fudge of
+				// CLOCKS_PER_SEC papered over exactly that). The clients
 				// count this down in real seconds, so the reset has to fire
 				// on real seconds too or the number on screen means nothing.
 				ri->endTime = enet_time_get();
@@ -5162,19 +5496,25 @@ void ServerState_Tick()
 		}
 
 		// The room list says whether this room can be joined, and that can
-		// change on its own as a clock runs down (RoomOpenForJoin): push a
-		// fresh list to everybody the moment it does. Likewise whether its
-		// race can be watched (1110, RoomOpenForSpectate): a green, the close
-		// before the forced return, a seat given or freed; and whether it is
-		// in a race (1111, RoomInRace): its load - a room shown closed
-		// already by a pick clock's last seconds still gets a list then.
-		// Last in the room's pass (1111), so each list says what this tick
-		// made of the room: the SG_STARTLOADING above is in the list that
-		// goes out with it, not a tick later (the reset's own push records
-		// itself: RoomList_Changed).
+		// change on its own as a clock runs down (RoomOpenForJoin): the list
+		// is marked for this pass's push (RoomList_Flush, below), which goes
+		// out at the end of the tick, or ROOM_LIST_MIN_MS after the previous
+		// push. Likewise whether its race can be watched (1110,
+		// RoomOpenForSpectate): a green, the close before the forced return,
+		// a seat given or freed; and whether it is in a race (1111,
+		// RoomInRace): its load - a room shown closed already by a pick
+		// clock's last seconds still gets a list then. Last in the room's
+		// pass (1111), so the list says what this tick made of the room: the
+		// SG_STARTLOADING above is in whatever list goes out next (the reset
+		// records its own change: RoomList_Changed).
 		if (RoomList_Changed(ri))
-			ForeachPeerLPL(SendRoomData);
+			RoomList_Dirty();
 	}
+
+	// the room list to every connection, once, for whatever changed in this
+	// pass - a join, a leave, a pick, a load, a reset, a kick's end
+	// (RoomList_Flush: no sooner than ROOM_LIST_MIN_MS after the last)
+	RoomList_Flush();
 }
 
 // SIGTERM (docker stop, compose down, systemd) or SIGINT (Ctrl+C): the main
@@ -5227,7 +5567,7 @@ static void ServerState_Stop(int sig)
 
 int main(int argc, char** argv)
 {
-#ifndef __WINDOWS__
+#ifndef _WIN32
 	// Line-buffer stdout even when it is a pipe. Under systemd, Docker or any
 	// other log collector glibc would otherwise hold output in a 4 KB buffer
 	// and release it in batches, so the startup lines (the banner, the
@@ -5235,18 +5575,23 @@ int main(int argc, char** argv)
 	// and a crash would lose whatever was still buffered. On a terminal this
 	// is already the default.
 	//
-	// Not on Windows: its C runtime has no line buffering (the request means
-	// full buffering there, which would hide the console output instead of
-	// helping), and it aborts the process on a size below 2 - which is how a
-	// first version of this line, with size 0, crashed Server.exe on startup
-	// before the banner was printed.
+	// Not on Windows, MinGW's build included: its C runtime has no line
+	// buffering (the request means full buffering there, which would hide
+	// the console output instead of helping), and it aborts the process on a
+	// size below 2 - which is how a first version of this line, with size 0,
+	// crashed Server.exe on startup before the banner was printed.
 	setvbuf(stdout, NULL, _IOLBF, BUFSIZ);
 #endif
+	// (Windows: a console shows each printf as it is made. Anywhere else - a
+	// file, a pipe, a service's log - the C runtime holds stdout in 4 KB
+	// blocks, which would have 'Ready on port' and the room logs arrive late,
+	// in batches, and be lost to a kill: the main loop flushes it once a pass
+	// instead, below. Unbuffered would cost a system call per character.)
 
-#ifdef __WINDOWS__
-	// The loop below sleeps a microsecond between ticks (usleep, SV_helper.c),
+#ifdef _WIN32
+	// The loop below sleeps a microsecond between ticks (SleepMicro, SV_helper.c),
 	// which Windows rounds up to its timer's period. ENet asks for 1 ms
-	// (enet_initialize, externals/enet/win32.c), so a tick is about 1 ms -
+	// (enet_initialize, enet/win32.c), so a tick is about 1 ms -
 	// but Windows 11 ignores that for a process it thinks is in the
 	// background (a minimised console, a service), back to 15.6 ms a tick,
 	// unless the process opts out: done here. Looked up at run time, so the
@@ -5287,14 +5632,16 @@ int main(int argc, char** argv)
 
 	while (!g_stopSignal)
 	{
-		#ifdef __WINDOWS__
-		void usleep(__int64 usec);
-		#endif
-
-		usleep(1);
+		SleepMicro(1);
 		ServerState_Tick();
 #if BACKFILL_PLAYERS > 0
 		Backfill_Tick();
+#endif
+#ifdef _WIN32
+		// What this pass printed, out now (see the top of main): a write per
+		// pass that printed anything, nothing for one that did not. The
+		// heartbeat thread's lines go out on the next pass.
+		fflush(stdout);
 #endif
 	}
 

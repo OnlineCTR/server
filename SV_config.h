@@ -20,7 +20,10 @@
 
 // ------------------------------------------------------------ connections
 
-// Connections allowed from one IP address at a time (see the CONNECT event).
+// Connections allowed from one IP address at a time. One over it is refused
+// at the CONNECT event, at once and logged (CountPeersLPL_FromHost); ENet
+// itself refuses a handshake past one more than this (duplicatePeers, set at
+// start-up), so half-open handshakes cannot pile up from one address either.
 #ifndef MAX_PEERS_PER_IP
 #define MAX_PEERS_PER_IP 12
 #endif
@@ -159,6 +162,87 @@
 // beyond it the least recently seen record is reused.
 #ifndef OCTR_HEARTBEAT_SEEN_MAX
 #define OCTR_HEARTBEAT_SEEN_MAX 512
+#endif
+
+// ------------------------------------------------------------------ limits
+//
+// What one connection may have the server hold, and send it. Set on the ENet
+// host at start-up (ServerState_FirstBoot, SV_main.c) and in the message
+// handler (Rate_*, SV_main.c).
+
+// The largest packet ENet takes from, or sends to, a connection. ENet's own
+// default is 32 MB, sized for file transfers, and a fragmented packet is set
+// aside in full when its first fragment arrives: with the default, any
+// connection could have the server allocate 32 MB for packets this game
+// never sends. The largest message in the protocol is 18 bytes (global.h);
+// every message struct is checked against this at compile time (SV_main.c,
+// beside SG_BUFFER_BYTES), so one that outgrows it fails the build, not the
+// wire.
+#ifndef MAX_PACKET_BYTES
+#define MAX_PACKET_BYTES 64
+#endif
+
+// Received data ENet may queue for one connection before the tick reads it
+// (ServerState_Tick runs about every millisecond). Past this, that
+// connection's further packets are dropped until the queue drains - a
+// reliable one is sent again by its sender. 4 KB is over 200 kart messages.
+// ENet's default is 32 MB.
+#ifndef MAX_WAITING_BYTES
+#define MAX_WAITING_BYTES 4096
+#endif
+
+// Connections the host holds at once: every seat in the 16 rooms, and the
+// rest on the room list. Was 16 x 12 + 128 = 320; a slot is about a
+// kilobyte, and a server with every slot taken is one nobody can join
+// (ENet's own ceiling is 4095).
+#ifndef MAX_PEERS
+#define MAX_PEERS 1024
+#endif
+
+// Messages a connection may send, by kind (Rate_*, SV_main.c): the kart
+// message (a client sends 30 a second, 60 with the 60 FPS disc), the weapon
+// messages (CG_WEAPON, CG_WEAPONEVENT: they come in bursts) and everything
+// else (the lobby's: a join, a name, a pick, a vote - and an empty message
+// or one of a type no client sends). Each kind is a bucket: PER_SEC tokens a
+// second flow in, up to BURST. A message takes a token, and one that finds
+// none is dropped. The bursts are what a stall can bunch up: ENet hands a
+// player's reliable messages over all at once when the one they were
+// waiting on finally arrives, and every one of them has to get through (the
+// lobby's: about 90 at most, the fastest a player can press, over a stall
+// short of ENet's 5 s timeout). A connection with FLOOD_DROPS_PER_SEC
+// dropped in one counted second (Rate_Take) is a flood, not a player, and is
+// disconnected. Ranges, checked as the server compiles: PER_SEC 1 to BURST
+// (0 does not turn a limit off), BURST up to 1000000, FLOOD_DROPS_PER_SEC 1
+// to 65535.
+#ifndef RATE_KART_PER_SEC
+#define RATE_KART_PER_SEC 150
+#endif
+#ifndef RATE_KART_BURST
+#define RATE_KART_BURST 300
+#endif
+#ifndef RATE_EVENT_PER_SEC
+#define RATE_EVENT_PER_SEC 60
+#endif
+#ifndef RATE_EVENT_BURST
+#define RATE_EVENT_BURST 240
+#endif
+#ifndef RATE_LOBBY_PER_SEC
+#define RATE_LOBBY_PER_SEC 30
+#endif
+#ifndef RATE_LOBBY_BURST
+#define RATE_LOBBY_BURST 120
+#endif
+#ifndef FLOOD_DROPS_PER_SEC
+#define FLOOD_DROPS_PER_SEC 300
+#endif
+
+// The room list goes to every connection on the server when a room changes
+// (a join, a leave, a track picked or cancelled, a race's load, start or end,
+// a kick's end). The pushes are gathered per tick (RoomList_Flush), and at
+// most one goes out every this many milliseconds: a host toggling the track
+// pick would otherwise have a list sent to everybody for every toggle.
+#ifndef ROOM_LIST_MIN_MS
+#define ROOM_LIST_MIN_MS 100
 #endif
 
 #endif

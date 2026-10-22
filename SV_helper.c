@@ -4,12 +4,22 @@
 // version 3 (LICENSE), with the additional terms in ADDITIONAL-TERMS under
 // its section 7. It comes with ABSOLUTELY NO WARRANTY.
 
-#ifdef __WINDOWS__
+// The main loop's pause between ticks (SV_main.c): usec microseconds, which
+// the system rounds up to its timer's period (about 1 ms on Windows once
+// ENet has asked for it, enet_initialize; tens of microseconds on Linux and
+// macOS).
+//
+// Windows - Visual Studio and MinGW alike (_WIN32, which both define; only
+// Server.vcxproj defines __WINDOWS__) - waits on a waitable timer.
+// MinGW-w64's own usleep() is no use there: it is Sleep(usec / 1000), so a
+// pause of a microsecond is Sleep(0), which returns at once, and the main
+// loop would spin a whole CPU core.
+#ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
-// keeps winsock.h out of Windows.h; enet.h (below) brings winsock2.h
+// keeps winsock.h out of windows.h; enet.h (below) brings winsock2.h
 #define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-void usleep(__int64 usec)
+#include <windows.h>
+void SleepMicro(long long usec)
 {
 	HANDLE timer;
 	LARGE_INTEGER ft;
@@ -20,6 +30,12 @@ void usleep(__int64 usec)
 	SetWaitableTimer(timer, &ft, 0, NULL, NULL, 0);
 	WaitForSingleObject(timer, INFINITE);
 	CloseHandle(timer);
+}
+#else
+#include <unistd.h>
+void SleepMicro(long long usec)
+{
+	usleep((useconds_t)usec);
 }
 #endif
 
@@ -54,7 +70,9 @@ int GetWeekDay()
 	return buffer[0] - '0';
 }
 
-#include "malloc.h"
+// malloc and free: <stdlib.h>, everywhere. Not <malloc.h>, which is glibc's
+// and MSVC's only - macOS has none, and a build there stopped at it.
+#include <stdlib.h>
 // The real type, not the old "typedef ENetPeer;" placeholder (which made
 // ENetPeer an int): CountPeersLPL_FromHost looks inside the peer.
 #include <enet/enet.h>
