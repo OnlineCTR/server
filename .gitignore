@@ -21,3 +21,6 @@ octr-server.env.*
 
 # autodeploy.sh's note of the release deployed here
 .last-deployed-tag
+
+# The website status, heartbeat endpoint and player count (not committed)
+php/

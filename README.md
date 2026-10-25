@@ -84,7 +84,7 @@ chmod 600 octr-server.env
 Docker reads it through `compose.yml`; under systemd, point `EnvironmentFile=` at it. It sets the
 heartbeat - the server's status on the site and in the launcher: the site's address, this
 server's ID and its own secret (issued per server by the OnlineCTR team), and the key all
-servers share for the site's "seen in the past 24h" count. With no address or no secret the
+servers share for the site's "seen in the past 7 days" count. With no address or no secret the
 heartbeat is off and the server runs unlisted.
 
 The server's own settings - connections per address, the lobby and race clocks, limits - are in
@@ -230,7 +230,7 @@ client and server check each other on, and steps only when a release changes the
 message struct or type in `global.h`, what the server does in reply to one, or the seats in a room
 (`MAX_NUM_PLAYERS`, though no message changes size). A release that leaves `SERVER_VERSION` alone
 needs no server update; every server already running keeps accepting the new client. Both show in
-the server's console banner, as `Build 1113, Server 1113` for this release.
+the server's console banner, as `Build 1114, Server 1114` for this release.
 
 `SV_main.c` and `global.h` always come from the same release: `SV_main.c` names the protocol it
 was written for (`SV_PROTOCOL`), and a `global.h` from another release refuses to build with it.

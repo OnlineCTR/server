@@ -39,7 +39,7 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1113
+#define SV_PROTOCOL 1114
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
@@ -259,6 +259,10 @@ typedef struct
 	// RoomOpenForSpectate): the green passing, the close before the forced
 	// return, the last spare seat taken, all pushed the same way.
 	char boolSpectateOpen;
+
+	// enet_time_get() of the last NET_EV_PING round the room was sent
+	// (Ping_Tick, 1114), 0 none yet
+	enet_uint32 pingSentAt;
 
 	// ...and whether it said the room is in a race (1111, RoomInRace): its
 	// load and its reset - pushed even when the room was shown closed
@@ -2788,6 +2792,44 @@ static void WeaponHold_Release(RoomInfo* ri, struct WeaponHold* h)
 }
 
 // Held claims whose time is up, each tick.
+// Every racer's round trip to this server, told to the whole room once a
+// second while it races (boolRaceAll): SG_WEAPONEVENT, kind NET_EV_PING,
+// clientID the player, identity its own, arg ENet's smoothed estimate in
+// ms / 4 (255 at most, 1 at least once ENet has one: 0 is "none yet" on
+// the ROM). Unsequenced, a round a second: a lost one is made up for by
+// the next. The ROM keeps them by slot for the warp orb's tie reach
+// (NetOrb_Tie, netWeapons.c): a leader on a high ping is further ahead
+// than its copy shows, and the shooter's own ping alone said too little
+// (1114, Matt: orbs fizzling with the leader just ahead).
+#define PING_TICK_MS 1000
+static void Ping_Tick(RoomInfo* ri)
+{
+	enet_uint32 now = enet_time_get();
+	struct SG_MessageWeaponEvent s;
+	int i;
+
+	if (!ri->boolRaceAll) { ri->pingSentAt = 0; return; }
+	if (ri->pingSentAt != 0 && (int)(now - ri->pingSentAt) < PING_TICK_MS) return;
+	ri->pingSentAt = now ? now : 1;
+	for (i = 0; i < MAX_CLIENTS; i++)
+	{
+		ENetPeer* peer = ri->peerInfos[i].peer;
+		unsigned int rtt;
+		if (peer == 0 || peer->state != ENET_PEER_STATE_CONNECTED) continue;
+		rtt = peer->roundTripTime / 4;
+		if (rtt == 0) rtt = 1;
+		if (rtt > 255) rtt = 255;
+		memset(&s, 0, sizeof(s));
+		s.type = SG_WEAPONEVENT;
+		s.clientID = i;
+		s.owner = i;
+		s.kind = NET_EV_PING;
+		s.serial = 0;
+		s.arg = (unsigned char)rtt;
+		broadcastToPeersUnreliable(ri, &s, sizeof(s));
+	}
+}
+
 static void WeaponHold_Tick(RoomInfo* ri)
 {
 	enet_uint32 now = enet_time_get();
@@ -5249,6 +5291,9 @@ void ServerState_Tick()
 
 		// contested touches whose wait is up (WeaponHold_*)
 		WeaponHold_Tick(ri);
+
+		// the racers' pings to the room, once a second (Ping_Tick, 1114)
+		Ping_Tick(ri);
 
 		// a game mode's round decided at its green (Round_Tick), then TAG's
 		// clock: started at the green, "it" out when it runs out (a round's

@@ -160,8 +160,10 @@
 
 // At most this many distinct players are tracked (and sent per heartbeat);
 // beyond it the least recently seen record is reused.
+// 2048 since 1114 (a week of players; 512 for a day): about 39 KB of
+// hashes a heartbeat at most - the site's OCTR_MAX_BODY allows 48 KB.
 #ifndef OCTR_HEARTBEAT_SEEN_MAX
-#define OCTR_HEARTBEAT_SEEN_MAX 512
+#define OCTR_HEARTBEAT_SEEN_MAX 2048
 #endif
 
 // ------------------------------------------------------------------ limits

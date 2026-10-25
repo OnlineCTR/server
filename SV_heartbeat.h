@@ -23,19 +23,21 @@
  * frames_unsynced disconnect detector. A blocking TLS handshake in the tick
  * loop would kick players.
  *
- * Players seen in the past 24 hours: for the site's "N seen in the past 24h",
- * which it used to guess from how the occupancy counts moved. Each player is
- * one keyed hash - HMAC-SHA256 of the UTC day number, the address and (once
- * known) the name, first 8 bytes as hex - kept in memory for 24 hours and
- * sent with every heartbeat as "seen":[...], so the site can union the lists
- * across servers and count. The key is OCTR_HEARTBEAT_SEEN_KEY, the same
+ * Players seen in the past 7 days (24 hours until 1114): for the site's "N
+ * seen in the past 7 days" (and its 24h figure), which it used to guess from
+ * how the occupancy counts moved. Each player is one keyed hash - HMAC-SHA256
+ * of the UTC week number, the address and (once known) the name, first 8
+ * bytes as hex - kept in memory for 7 days and sent with every heartbeat:
+ * "seen":[...] those seen in the past 24 hours, "seenWeek":[...] the rest of
+ * the week, so the site can union the lists across servers and count. The key is OCTR_HEARTBEAT_SEEN_KEY, the same
  * value on every server, so one player is one hash whichever region they
  * are on; left unset, each server keys with its own heartbeat secret and a
- * player who visits two regions in a day counts twice. No address is stored
- * or sent, nothing survives a restart, and the day in the key means a hash
- * cannot be matched to the same player tomorrow. Two people behind one
+ * player who visits two regions in a week counts twice. No address is stored
+ * or sent, nothing survives a restart, and the week in the key means a hash
+ * cannot be matched to the same player the next week. Two people behind one
  * address count as one until they name themselves, then as two; a player
- * whose address changes during the day counts twice. Heartbeat off means
+ * whose address changes during the week, or who plays on both sides of the
+ * week's turn (UTC Thursday 00:00, the epoch's weekday), counts twice. Heartbeat off means
  * nothing is recorded at all.
  */
 

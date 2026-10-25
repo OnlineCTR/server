@@ -230,9 +230,15 @@ static size_t sink(void* p, size_t sz, size_t n, void* u)
 	return sz * n;
 }
 
-/* ------------------------------------------------- players seen, 24 hours */
+/* -------------------------------------------------- players seen, 7 days */
 
-#define SEEN_WINDOW_SEC (24 * 60 * 60)
+/* Kept a week (1114, Matt: "Instead of 24 hours of player data saved on the
+   server, let's make it 7 days"; 24 hours until then). The heartbeat sends
+   the past 24 hours as "seen", as before - so a site snippet from before
+   this still counts its 24h line right - and the rest of the week as
+   "seenWeek". */
+#define SEEN_WINDOW_SEC (7 * 24 * 60 * 60)
+#define SEEN_RECENT_SEC (24 * 60 * 60)
 #define SEEN_HEX_LEN    16              /* 8 bytes of the HMAC */
 
 typedef struct
@@ -243,12 +249,14 @@ typedef struct
 
 static SeenEntry g_seen[OCTR_HEARTBEAT_SEEN_MAX];   /* guarded by g_lock */
 
-/* HMAC(key, "<utc day number>|<address>|<name>"), first 8 bytes as hex. The
+/* HMAC(key, "<utc week number>|<address>|<name>"), first 8 bytes as hex. The
    key is OCTR_HEARTBEAT_SEEN_KEY when set - the same value on every server,
    so the site's union of the lists counts a player once however many
    regions they visit - and otherwise this server's own heartbeat secret.
-   The day number rather than a date string: no gmtime, so no MSVC _s
-   variant to juggle. name may be NULL (address only, at connect). */
+   The week (whole SEEN_WINDOW_SEC periods since the epoch; the day until
+   1114) rather than a date string: no gmtime, so no MSVC _s variant to
+   juggle - and one player is one hash all week, so the week's count is
+   not every day's added up. name may be NULL (address only, at connect). */
 static void seen_hash(unsigned int host, const char* name, char outHex[SEEN_HEX_LEN + 1])
 {
 	char msg[96];
@@ -305,18 +313,19 @@ static int seen_touch(const char* hex, time_t now)
 	return i;
 }
 
-/* The JSON array body for "seen" - the hashes still inside the window,
-   quoted and comma-separated - and how many there are. */
-static int seen_list(char* out, size_t outSize, time_t now)
+/* The JSON array body for "seen" (recent: seen in the past SEEN_RECENT_SEC)
+   or "seenWeek" (the rest still inside the window) - quoted and
+   comma-separated - and how many there are. Expire first. */
+static int seen_list(char* out, size_t outSize, time_t now, int recent)
 {
 	int i, count = 0;
 	size_t used = 0;
 
 	out[0] = '\0';
-	seen_expire(now);
 	for (i = 0; i < OCTR_HEARTBEAT_SEEN_MAX && used + SEEN_HEX_LEN + 4 < outSize; i++)
 	{
 		if (!g_seen[i].hex[0]) continue;
+		if ((now - g_seen[i].lastSeen <= SEEN_RECENT_SEC) != (recent != 0)) continue;
 		used += (size_t)snprintf(out + used, outSize - used, "%s\"%s\"",
 			count ? "," : "", g_seen[i].hex);
 		count++;
@@ -359,13 +368,13 @@ void Heartbeat_SeenName(void* handle, unsigned int host, const char* name)
 
 	MUTEX_LOCK(&g_lock);
 	/* The connect-time record is only this peer's if it still holds the
-	   address-only hash: the slot may have been recycled, or the day rolled. */
+	   address-only hash: the slot may have been recycled, or the week rolled. */
 	if (i >= 0 && i < OCTR_HEARTBEAT_SEEN_MAX && strcmp(g_seen[i].hex, hexConnect) == 0)
 	{
 		existing = seen_find(hex);
 		if (existing >= 0)
 		{
-			/* Already counted today under this address and name: keep that
+			/* Already counted this week under this address and name: keep that
 			   record, release the one made at connect. */
 			g_seen[existing].lastSeen = now;
 			g_seen[i].hex[0] = '\0';
@@ -383,7 +392,8 @@ void Heartbeat_SeenName(void* handle, unsigned int host, const char* name)
 	MUTEX_UNLOCK(&g_lock);
 }
 
-static void build_json(const OctrStatus* s, const char* seenList, int seenCount, char* out, size_t outSize)
+static void build_json(const OctrStatus* s, const char* seenList, int seenCount, const char* weekList, int weekCount,
+	char* out, size_t outSize)
 {
 	int i;
 	size_t used;
@@ -401,18 +411,24 @@ static void build_json(const OctrStatus* s, const char* seenList, int seenCount,
 		used += (size_t)snprintf(out + used, outSize - used, "],\"seen24h\":%d,\"seen\":[", seenCount);
 
 	if (used < outSize)
-		snprintf(out + used, outSize - used, "%s]}", seenList);
+		used += (size_t)snprintf(out + used, outSize - used, "%s],\"seen7d\":%d,\"seenWeek\":[", seenList,
+			seenCount + weekCount);
+
+	if (used < outSize)
+		snprintf(out + used, outSize - used, "%s]}", weekList);
 }
 
 static void post_once(void)
 {
 	OctrStatus snapshot;
 	/* body: rooms ~1 KB plus up to OCTR_HEARTBEAT_SEEN_MAX quoted hashes at
-	   19 bytes each; signing wraps it with id, ts and nonce. */
+	   19 bytes each, split between the two lists; signing wraps it with id,
+	   ts and nonce. */
 	static char seenList[OCTR_HEARTBEAT_SEEN_MAX * (SEEN_HEX_LEN + 3) + 16];
+	static char weekList[OCTR_HEARTBEAT_SEEN_MAX * (SEEN_HEX_LEN + 3) + 16];
 	static char body[sizeof(seenList) + 2048];
 	static char signing[sizeof(body) + 256];
-	int seenCount;
+	int seenCount, weekCount;
 	char sig[65];
 	char hdrTs[64], hdrSig[96], hdrId[96], hdrNonce[64];
 	char nonce[48];
@@ -427,11 +443,13 @@ static void post_once(void)
 	snapshot.uptimeSec = (long)(time(NULL) - g_startTime);
 	g_nonceCounter++;
 	snprintf(nonce, sizeof(nonce), "%lld-%lld", (long long)time(NULL), g_nonceCounter);
-	seenCount = seen_list(seenList, sizeof(seenList), time(NULL));
+	seen_expire(time(NULL));
+	seenCount = seen_list(seenList, sizeof(seenList), time(NULL), 1);
+	weekCount = seen_list(weekList, sizeof(weekList), time(NULL), 0);
 	MUTEX_UNLOCK(&g_lock);
 
 	ts = (long long)time(NULL);
-	build_json(&snapshot, seenList, seenCount, body, sizeof(body));
+	build_json(&snapshot, seenList, seenCount, weekList, weekCount, body, sizeof(body));
 
 	/* Sign id + ts + nonce + body together. Binding all four means a captured
 	   request cannot be replayed against a different server id or a later

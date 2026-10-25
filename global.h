@@ -25,8 +25,8 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1113
-#define SERVER_VERSION 1113
+#define VERSION 1114
+#define SERVER_VERSION 1114
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
 // defined before it includes this header; 1111). One from another release
@@ -145,9 +145,10 @@
 // (saffiFlame.h); a whole number of sectors from MODSC_ADDR, so the block's
 // whole-sector read stays under it (saffiFlame.c checks both). 0x807B0000
 // until 16 Oct 2026, under the kart view's old 48 KB model buffer - unused
-// since the models moved to their cache.
+// since the models moved to their cache; 0x807BC000 until 25 Oct 2026
+// (1114: the tables moved up to the top of their 16 KB, 6 KB more here).
 #define MODSC_ADDR 0x807A0000
-#define MODSC_END  0x807BC000
+#define MODSC_END  0x807BD800
 #define BI_MODSC   234
 
 // The game modes' knockout chime (leaverSound.c): KART.HWL sample 156, raw
@@ -416,10 +417,11 @@ STATIC_ASSERT2(MAX_NUM_PLAYERS <= ROOM_PLAYERS(0xFF) &&
 #define NET_EV_IT         12  // server -> clients only (TAG): clientID who is it (0xF none), owner the tagger (0xF none), serial bit 0 the clock running, arg its seconds left
 #define NET_EV_LIVES      13  // server -> clients only (BOMBARDMENT): clientID lost a life and is still in, owner the attacker (0xF none), arg the lives left (1 to BOMB_LIVES - 1); the last life's loss is NET_EV_OUT
 #define NET_EV_KART_CLAIM 14  // 1107: the sender's masked kart bumped another player's on the sender's screen - or, 1109, its shield did, mask or not, or, 1110, it squished it (VehPhysCrash_Attack's squish: Saffi or the TURBO item's fire), mask or not; no weapon, the identity's shooter field is the bumped kart's client ID and its count the hit VehPhysCrash_Attack gave it there (NET_CLAIM_HIT: the mask's, type 2 reason 6; the sender's own shield bumped off on it, 2 and 0; a squish, 3 and 5: 1110, mask or not, by a kart with Saffi or the TURBO item's fire). The server sends it to that player alone, arg the two players' round trips added, in 4 ms (ROM -> server: 0); that kart's machine judges it (NetKart_ClaimApply, netWeapons.c) and hurts its kart as the game would, which goes out as its NET_EV_KART_HURT
-#define NET_EV_COUNT      15
+#define NET_EV_PING       15  // 1114, server -> clients only, once a second in a race (Ping_Tick): clientID the player, arg its round trip to the server in ms / 4 (ENet's smoothed estimate, 255 at most, never 0 once known); identity its own client ID. The ROM keeps it by slot (netPingMs4, netLap.c) for the warp orb's tie reach (NetOrb_Tie): the other player's half trip, which the ROM could not know until now
+#define NET_EV_COUNT      16
 #define NET_CLAIM_HIT(type, reason) ((type) | ((reason) << 3))   // NET_EV_KART_CLAIM's count
 // the kinds only the server sends: refused from a client
-#define NET_EV_SERVER_MASK ((1 << NET_EV_OUT) | (1 << NET_EV_IT) | (1 << NET_EV_LIVES))
+#define NET_EV_SERVER_MASK ((1 << NET_EV_OUT) | (1 << NET_EV_IT) | (1 << NET_EV_LIVES) | (1 << NET_EV_PING))
 // For the server: the kinds that end an identity (the first one relayed,
 // any later one dropped), the kinds only the kart carrying it may send, and
 // NET_EV_TNT_ONHEAD, which hands it to a head; NET_EV_KART_HURT has no
@@ -830,13 +832,13 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 // The servers a player can pick, by octr->serverCountry number, which Quick
 // Play asks (QuickPlay_ProbeThread, CL_main.cpp): the region list's rows
 // not greyed (NewPage_ServerCountry, menu.c, which keeps its own test for
-// Mods1's bytes - change the two together). Mexico (2) and Singapore (5)
-// have nobody hosting them for now; a beta build has Beta (7) alone, and
-// the private room (6) is never a row.
+// Mods1's bytes - change the two together). Mexico (2) has nobody hosting
+// it for now (5, Singapore until 1114, is USA East, open); a beta build
+// has Beta (7) alone, and the private room (6) is never a row.
 #ifdef ONLINE_BETA_MODE
 #define SERVER_OPEN(c) ((c) == 7)
 #else
-#define SERVER_OPEN(c) ((c) != 2 && (c) != 5 && (c) < 6)
+#define SERVER_OPEN(c) ((c) != 2 && (c) < 6)
 #endif
 
 // The server list state's screens (lobbyView, logo.c; home.c): HOME, the
