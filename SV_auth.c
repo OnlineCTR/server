@@ -174,6 +174,7 @@ void Auth_Init(void)
 	memset(nonces, 0, sizeof(nonces));
 	memset(suspects, 0, sizeof(suspects));
 	memset(bars, 0, sizeof(bars));
+	PrintPrefix(-1);   // (the log's time and General, as the lines around it: Matt)
 	if (openServer)
 	{
 		printf("Joins: OPEN SERVER (OCTR_OPEN_SERVER): unsigned joins are taken - never on a public server\n");

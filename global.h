@@ -25,8 +25,8 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1115
-#define SERVER_VERSION 1115
+#define VERSION 1117   // (1116: 28 Oct, the client's checks fixed - no server change, SERVER_VERSION stayed 1115; 1117: the private room's CONNECTING, the spectator's WATCHERS)
+#define SERVER_VERSION 1117   // (1115 until 1117: Matt, 28 Oct - the numbers match; a server release, and a new signing key pair: make_key.py)
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
 // defined before it includes this header; 1111). One from another release
@@ -148,7 +148,7 @@
 // since the models moved to their cache; 0x807BC000 until 25 Oct 2026
 // (1114: the tables moved up to the top of their 16 KB, 6 KB more here).
 #define MODSC_ADDR 0x807A0000
-#define MODSC_END  0x807BD800
+#define MODSC_END  0x807C0000   // (1117: up to the track pictures, the Saffi flame tables moved under the kart cache's top - saffiFlame.h)
 #define BI_MODSC   234
 
 // The game modes' knockout chime (leaverSound.c): KART.HWL sample 156, raw
@@ -269,7 +269,7 @@
 // menu.c writes after the count and cuts off beside two digits; and a
 // region list row's, "AUSTRALIA  999MS  999 ONLINE" and its 0 (ServerList_Rows,
 // home.c), which share the buffer (roomRows, in Mods4.c)
-#define ROOM_LABEL_SIZE 29
+#define ROOM_LABEL_SIZE 36   // (29 until 1117: the room rows' ULTRA SACRED FIRE kinds - menu.c; the buffer in ModsC since, home.c)
 
 // The server and room lists' column: the boxes' centre and the lines under
 // them. The room list's box, the widest (20-character rows), has its frame
@@ -284,6 +284,13 @@
 // (lobbyBusy.c). Its rows are too wide for the column right of the logo.
 #define REGION_LIST_X 0x100
 #define REGION_LIST_Y 0x74
+// The room list's box centre (1116 moved it into the region list's place;
+// 1117: 4 px lower, off the logo's ribbon - Matt), and the room list's title
+// slot (lngStrings[0x4e], drawn in the big font under MENU_BIG_TITLE, menu.c):
+// spaces, ROOM_TITLE_SPACES of them, so the box is one fixed width that holds
+// the longest title its own lines draw (RoomList_DrawTitle, lobbyBusy.c), e.g.
+// "PRIVATE ROOM - 99MS - 99 ONLINE".
+#define ROOM_LIST_Y   (REGION_LIST_Y + 6)   // (+4 left one clear row under the ribbon's tips: 1117's audit)
 
 // Every online screen's button hints - SELECT, BACK, PRIVATE, ABOUT, CANCEL
 // - centred on the screen, on one row (y 0xc6), so they stay put from
@@ -606,7 +613,10 @@ struct OnlineCTR
 	// Written by the client only; cleared at SG_NEWCLIENT, SG_STARTLOADING
 	// and a drop, not with the round (Round_Clear also runs at the green).
 	// The ROM reads it for the racer's WATCHERS on the HUD (playerCount.c),
-	// shown while it is 1 or more.
+	// shown while it is 1 or more. Since 1117 this in the LOW four bits, and
+	// in the high four the count of those watching the racer this machine's
+	// camera is on (LOBBYCOUNT_TARGET_WATCHERS: the spectator's WATCHERS,
+	// endOfRaceUI.c) - the struct has no byte to spare; both 12 at most.
 	unsigned char watchers;
 
 	// 0x16A (1110), the same gap: the other players' karts this machine's
@@ -877,6 +887,8 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define LOBBY_VIEW_QUICK   2
 #define LOBBY_VIEW_NOGAMES 3   // QUICK PLAY with nobody online: NO GAMES AVAILABLE, START ONE?
 #define LOBBY_VIEW_SERVERS_OUT 4   // (1113) the region list on its way down after TRIANGLE, the logo going back; then the home box in (home.c)
+#define LOBBY_VIEW_KEYPAD      5   // (1115) the private room's keypad window, in from the right once the home box has left, the logo at the top as the region list's (keypad.c)
+#define LOBBY_VIEW_KEYPAD_OUT  6   // (1115) the window on its way out to the right after TRIANGLE; then the home box in, the logo back with it
 
 // octr->quickPlayCmd, the ROM to the client
 #define QP_CMD_NONE   0
@@ -934,6 +946,7 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define KICKED_NOTICE_VOTE 1   // KICKED BY VOTE, on the room list it rejoins (KICKED_NOTICE_HOST, the host's KICK PLAYER, up to 1109)
 #define KICKED_NOTICE_IDLE 2   // KICKED FOR IDLING, on the server list
 #define KICKED_NOTICE_CHEAT 3  // KICKED BY ANTI-CHEAT (1115), on the server list it lands on - the client's own detection, or the server's DISCONNECT_REASON_CHEAT
+#define KICKED_NOTICE_CONNECT 4 // CONNECTION FAILED (1115): a connection the client could not make, under the region list or the home box it lands on (the keypad's)
 
 // octr->special (1110)
 #define OCTR_SPECIAL_SPECTATOR 1   // watching a race joined in progress (NEWCLIENT_SPECTATOR): the own kart parked off the track, hidden and finished, the camera on the racers (spectate.c)
@@ -1560,6 +1573,13 @@ struct SG_MessageLobbyCountdown
 
 #define LOBBYCOUNT_CLOCK    0
 #define LOBBYCOUNT_WATCHERS 1
+// (1117, Matt) in seconds' place, the players watching the racer this seat's
+// camera is on - this seat among them - sent to each of them as the count
+// changes, and to a seat as its camera goes on that racer (Watch_Tell,
+// Watch_Set, SV_main.c): a spectator's WATCHERS, top left (endOfRaceUI.c).
+// A kind an older client passes over (SERVER_VERSION moved to 1117 with it
+// all the same, Matt: the numbers match).
+#define LOBBYCOUNT_TARGET_WATCHERS 2
 
 STATIC_ASSERT2(sizeof(struct SG_Header) == 1, "Size of SG_Header must be 1 byte");
 STATIC_ASSERT2(sizeof(struct SG_MessageHost) == 1, "Size of SG_MessageHost must be 1 byte");

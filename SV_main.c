@@ -39,7 +39,7 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1115
+#define SV_PROTOCOL 1117   // (1115 until 1117: Matt, the numbers match)
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
@@ -491,7 +491,7 @@ static int KickBan_Expire(void)
 static void PrintRoomName(int rn)
 {
 	static const char* const kinds[ROOM_PAGE_ROWS] =
-		{ "NO ITEMS", "CLASSIC", "POTION GAME", "BOMBARDMENT", "ELIMINATION", "TAG YOU'RE IT", "NO ITEMS USF", "CLASSIC USF" };
+		{ "NO ITEMS", "CLASSIC", "POTION GAME", "BOMBARDMENT", "ELIMINATION", "TAG, YOU'RE IT!", "NO ITEMS ULTRA SACRED FIRE", "CLASSIC ULTRA SACRED FIRE" };   // (the room list's names, 1117)
 	printf("%s %d%s", kinds[ROOM_ROW(rn)], ROOM_ROW(rn) + 1,
 		ROOM_NO_SHORTCUTS(rn) ? ", Shortcuts Disabled" : "");
 }
@@ -1027,7 +1027,8 @@ static int Watch_Count(RoomInfo* ri, int t)
 
 // Racer t told its own count (SG_LOBBYCOUNTDOWN's LOBBYCOUNT_WATCHERS: its
 // HUD's WATCHERS, playerCount.c, shown at 1 and more) if it changed since it
-// was last told. Nobody else is ever sent it. A seat with no player, or a
+// was last told - and, since 1117, every seat watching it (its spectators'
+// WATCHERS, LOBBYCOUNT_TARGET_WATCHERS). A seat with no player, or a
 // spectator's, is never a racer watched.
 static void Watch_Tell(RoomInfo* ri, int t)
 {
@@ -1046,6 +1047,16 @@ static void Watch_Tell(RoomInfo* ri, int t)
 	sg.kind = LOBBYCOUNT_WATCHERS;
 	sg.seconds = (unsigned char)n;
 	sendToPeerReliable(pt->peer, &sg, sizeof(struct SG_MessageLobbyCountdown));
+
+	// and every seat whose camera is on it (1117, Matt: a spectator's WATCHERS,
+	// top left - LOBBYCOUNT_TARGET_WATCHERS, a kind older clients pass over)
+	sg.kind = LOBBYCOUNT_TARGET_WATCHERS;
+	for (int i = 0; i < MAX_CLIENTS; i++)
+	{
+		const PeerInfo* pw = &ri->peerInfos[i];
+		if (i != t && pw->peer != 0 && pw->watching == t + 1)
+			sendToPeerReliable(pw->peer, &sg, sizeof(struct SG_MessageLobbyCountdown));
+	}
 
 	PrintPrefix((int)(ri - roomInfos) + 1);
 	printf("Player %.*s (%d) is watched by %d\n", NAME_LEN, &pt->name[0], t, n);
@@ -1082,6 +1093,17 @@ static void Watch_Set(RoomInfo* ri, int id, int t)
 
 	Watch_Tell(ri, was);
 	Watch_Tell(ri, t);
+
+	// and this seat its new racer's count even where that count did not change
+	// (a spectator not caught up yet is not counted: Watch_Count) - 1117
+	if (t >= 0 && pi->peer != 0)
+	{
+		struct SG_MessageLobbyCountdown sg;
+		sg.type = SG_LOBBYCOUNTDOWN;
+		sg.kind = LOBBYCOUNT_TARGET_WATCHERS;
+		sg.seconds = (unsigned char)Watch_Count(ri, t);
+		sendToPeerReliable(pi->peer, &sg, sizeof(struct SG_MessageLobbyCountdown));
+	}
 }
 
 // Seat id gone (ProcessDisconnectEvent, its peer already NULL): the racer it
