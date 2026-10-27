@@ -90,6 +90,43 @@ heartbeat is off and the server runs unlisted.
 The server's own settings - connections per address, the lobby and race clocks, limits - are in
 `SV_config.h`.
 
+### Official clients only
+
+From build 1115 every join is signed: the official launcher signs each join with the release's
+private key, and the server checks it with the release's public key (`OCTR_CLIENT_PUBKEY` in
+`SV_config.h`, new with every `SERVER_VERSION`). A join without a good signature is refused -
+the room list goes back, as for a wrong version - and an address refused three times in a
+minute is barred for ten minutes, as is a connection that keeps sending messages no client of
+this release can (`SV_auth.c`). Nothing is configured for this: the key is in the source.
+`OCTR_OPEN_SERVER=1` in the environment takes unsigned joins too, for a private server and a
+client built by hand; the server says so when it starts. Never set it on a public server.
+The dedicated servers listed in the launcher are for the official client only.
+
+### Anti-cheat
+
+From build 1115 the client watches the game's memory - the game's code and ModsC against the
+release, and the game's own cheat codes - every two seconds on a server and at the character
+lock-in, and the launcher turns DuckStation's cheats off at every launch. A client that finds a
+change sends `CG_CHEAT`; the server removes the player (`KICKED BY ANTI-CHEAT` on their screen)
+and bars the address for ten minutes (`CHEAT_BAN_SECONDS`). With the heartbeat on, the ban goes
+to the site as a keyed hash of the address and comes back to every server with its next
+heartbeat, so the player is barred everywhere for those ten minutes; the hash uses
+`OCTR_HEARTBEAT_SEEN_KEY`, which must be the same on every server for that to work (the server
+says at start-up when it is missing). No address list ever leaves a server. Without the
+heartbeat the bar is local.
+
+### Floods
+
+The server limits what one connection or one address can do to it (`SV_config.h`): 12 connections
+per address; per-connection message rates with a disconnect for a flood; a 4 KB receive queue; 20
+connections per address per minute and 40 new connections per second server-wide, past which
+the address is barred for ten minutes or the rest of that second's connections are refused; a
+room-list connection that sends nothing for 30 s is dropped; and 10 status queries per address
+per second are answered, the rest dropped. What it cannot do is anything about a flood that
+fills the host's network link: that is the provider's or the OS firewall's job. On Linux a rate
+limit on the port in front of the server is one line, for example
+`iptables -A INPUT -p udp --dport 64001 -m hashlimit --hashlimit-name octr --hashlimit-above 300/sec --hashlimit-mode srcip -j DROP`.
+
 ### Running on Windows Servers
 
 Build `Server.sln` (Release, x64) from a release tag, then copy these into one folder on the server,

@@ -176,12 +176,13 @@
 // default is 32 MB, sized for file transfers, and a fragmented packet is set
 // aside in full when its first fragment arrives: with the default, any
 // connection could have the server allocate 32 MB for packets this game
-// never sends. The largest message in the protocol is 18 bytes (global.h);
-// every message struct is checked against this at compile time (SV_main.c,
-// beside SG_BUFFER_BYTES), so one that outgrows it fails the build, not the
-// wire.
+// never sends. The largest message in the protocol is the 68-byte join
+// (CG_MessageRoom with its signature, 1115; 34 bytes before it, the room
+// list with its nonce); every message struct is checked against this at
+// compile time (SV_main.c, beside SG_BUFFER_BYTES), so one that outgrows it
+// fails the build, not the wire.
 #ifndef MAX_PACKET_BYTES
-#define MAX_PACKET_BYTES 64
+#define MAX_PACKET_BYTES 72
 #endif
 
 // Received data ENet may queue for one connection before the tick reads it
@@ -245,6 +246,97 @@
 // pick would otherwise have a list sent to everybody for every toggle.
 #ifndef ROOM_LIST_MIN_MS
 #define ROOM_LIST_MIN_MS 100
+#endif
+
+// The signed join (1115; global.h's OCTR_AUTH_*, SV_auth.c). The release's
+// client public key: every join must carry a signature the launcher made
+// with the matching private key, which only the OnlineCTR team holds. A new
+// pair with every SERVER_VERSION (tools/Launcher/make_key.py in the game's
+// tree writes this line); a server built with another release's key
+// refuses every join, so this header and global.h come from one release.
+// Running with OCTR_OPEN_SERVER=1 in the environment takes unsigned joins
+// too (a private server for a client built by hand): said at start-up,
+// and never on a public server.
+#define OCTR_CLIENT_PUBKEY_VERSION 1115
+#define OCTR_CLIENT_PUBKEY { 0xc0, 0xb5, 0x8c, 0xe6, 0x21, 0xa2, 0x57, 0xc5, 0x95, 0x90, 0x1e, 0x1c, 0xa9, 0xa2, 0xc5, 0x88, 0x10, 0x32, 0x02, 0xd3, 0xfa, 0x28, 0x84, 0x09, 0x19, 0x83, 0x58, 0x8f, 0x2b, 0x7d, 0xa0, 0xc2 }
+
+// A join refused for its signature counts against its address: this many
+// within AUTH_FAIL_WINDOW_SECONDS and the address is barred from the server
+// (its connections refused at CONNECT, as a banned address's) for
+// AUTH_BAR_SECONDS. An official client never fails: its launcher signs every
+// join. The table holds AUTH_BARS addresses; past that the one with the
+// least time left goes first.
+#ifndef AUTH_FAILS_MAX
+#define AUTH_FAILS_MAX 3
+#endif
+#ifndef AUTH_FAIL_WINDOW_SECONDS
+#define AUTH_FAIL_WINDOW_SECONDS 60
+#endif
+#ifndef AUTH_BAR_SECONDS
+#define AUTH_BAR_SECONDS 600
+#endif
+#ifndef AUTH_BARS
+#define AUTH_BARS 128
+#endif
+
+// A message that no client of this release can send - a field past its
+// range, a type the protocol has not got (Suspect, SV_auth.c) - counts
+// against its connection: this many within SUSPECT_WINDOW_SECONDS and it is
+// disconnected and its address barred as above. A real client's messages
+// are never among them (a late one, a race's leftovers, are dropped without
+// a count); an unofficial or a tampered one's are.
+#ifndef SUSPECT_MAX
+#define SUSPECT_MAX 10
+#endif
+#ifndef SUSPECT_WINDOW_SECONDS
+#define SUSPECT_WINDOW_SECONDS 60
+#endif
+
+// Connection floods (1115; Guard_*, SV_auth.c). An address that opens
+// CONNECT_PER_IP_PER_MINUTE connections within a minute is barred as above
+// (a player reconnecting after a few drops is nowhere near it); past
+// CONNECT_PER_SECOND_MAX new connections in one second, server-wide, the
+// rest of that second's are refused (a server restart with everybody
+// piling back in stays under it); a connection on the room list that has
+// sent nothing for ROOMLIST_SILENT_SECONDS is disconnected (the client
+// asks for the list every 5 s while it is there, so a player browsing
+// never trips it - a bot holding a slot does); and an address sending
+// more than QUERY_PER_IP_PER_SEC Quick Play status queries in a second
+// has the rest dropped unanswered (Quick Play sends one per server per
+// probe). CONNECT_TRACK and QUERY_TRACK are the addresses counted at
+// once; past them the oldest count goes first.
+#ifndef CONNECT_PER_IP_PER_MINUTE
+#define CONNECT_PER_IP_PER_MINUTE 20
+#endif
+#ifndef CONNECT_PER_SECOND_MAX
+#define CONNECT_PER_SECOND_MAX 40
+#endif
+#ifndef ROOMLIST_SILENT_SECONDS
+#define ROOMLIST_SILENT_SECONDS 30
+#endif
+#ifndef QUERY_PER_IP_PER_SEC
+#define QUERY_PER_IP_PER_SEC 10
+#endif
+#ifndef CONNECT_TRACK
+#define CONNECT_TRACK 256
+#endif
+#ifndef QUERY_TRACK
+#define QUERY_TRACK 64
+#endif
+
+// Anti-cheat (1115; CG_CHEAT, global.h). A player whose client's own checks
+// tripped is removed (DISCONNECT_REASON_CHEAT: KICKED BY ANTI-CHEAT on their
+// screen) and the address barred for CHEAT_BAN_SECONDS here - and, with the
+// heartbeat on, on every server: the ban goes to the site as a keyed hash of
+// the address (the shared OCTR_HEARTBEAT_SEEN_KEY, so every server makes
+// the same hash and no address list leaves any of them) and comes back to
+// all of them with their next heartbeat (SV_heartbeat.c). HEARTBEAT_BANS_MAX
+// is the most a server keeps and sends at once.
+#ifndef CHEAT_BAN_SECONDS
+#define CHEAT_BAN_SECONDS 600
+#endif
+#ifndef HEARTBEAT_BANS_MAX
+#define HEARTBEAT_BANS_MAX 256
 #endif
 
 #endif

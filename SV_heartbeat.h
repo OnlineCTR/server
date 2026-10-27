@@ -100,6 +100,17 @@ void* Heartbeat_SeenConnect(unsigned int host);
    A player already counted today under that address and name stays one. */
 void  Heartbeat_SeenName(void* handle, unsigned int host, const char* name);
 
+/* Anti-cheat bans shared through the site (1115). Heartbeat_BanPublish: this
+   address is barred here for CHEAT_BAN_SECONDS (CG_CHEAT, SV_main.c): its
+   keyed hash - HMAC(OCTR_HEARTBEAT_SEEN_KEY, "ban|<address>"), the first 8
+   bytes as hex, as the seen hashes - goes to the site in the next heartbeat
+   with the seconds left, and the site's whole list (every server's) comes
+   back in the reply and is kept here. Heartbeat_Banned, at CONNECT: 1 when
+   the address's hash is on that list with time left. Nothing without the
+   heartbeat (the stubs, or no URL/secret): the local bar alone then. */
+void  Heartbeat_BanPublish(unsigned int host);
+int   Heartbeat_Banned(unsigned int host);
+
 /* Optional; the process usually just exits. */
 void Heartbeat_Shutdown(void);
 

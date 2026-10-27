@@ -20,6 +20,15 @@
     <ClCompile Include="SV_helper.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SV_auth.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="monocypher\monocypher.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="monocypher\monocypher-ed25519.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="SV_heartbeat.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -59,6 +68,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SV_config.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SV_auth.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SV_heartbeat.h">

@@ -13,6 +13,7 @@
  * This keeps the module dependent on libcurl alone.
  */
 
+#include "SV_config.h"
 #include "SV_heartbeat.h"
 
 #ifdef OCTR_HEARTBEAT
@@ -222,12 +223,142 @@ static int          g_intervalSec = HEARTBEAT_INTERVAL_SECONDS;
 static long long    g_nonceCounter = 0;
 static time_t       g_startTime;
 
-/* Discard whatever the endpoint replies with; we only care about the status
-   code. Without this libcurl prints the body to stdout and pollutes the log. */
+/* The endpoint's reply, kept for the bans in it (bans_from_reply; 1115 -
+   discarded before that, which also kept libcurl from printing it into the
+   log). What does not fit REPLY_MAX is dropped: the status is read first. */
+#define REPLY_MAX 16384
+static char   g_reply[REPLY_MAX + 1];
+static size_t g_replyLen;
 static size_t sink(void* p, size_t sz, size_t n, void* u)
 {
-	(void)p; (void)u;
-	return sz * n;
+	size_t len = sz * n;
+	(void)u;
+	if (g_replyLen < REPLY_MAX)
+	{
+		size_t take = len;
+		if (take > REPLY_MAX - g_replyLen) take = REPLY_MAX - g_replyLen;
+		memcpy(g_reply + g_replyLen, p, take);
+		g_replyLen += take;
+		g_reply[g_replyLen] = '\0';
+	}
+	return len;
+}
+
+/* -------------------------------------------------- anti-cheat bans (1115) */
+
+#define BAN_HEX_LEN 16   /* 8 bytes of the HMAC, as SEEN_HEX_LEN below */
+
+/* The addresses barred for cheating, this server's and the others' from the
+   site, as keyed hashes (ban_hash) with when they end. Guarded by g_lock. */
+typedef struct
+{
+	char   hex[BAN_HEX_LEN + 1];   /* "" = free */
+	time_t until;
+} BanEntry;
+static BanEntry g_bans[HEARTBEAT_BANS_MAX];
+
+static void ban_hash(unsigned int host, char outHex[BAN_HEX_LEN + 1]);
+
+/* With g_lock held: the hash's slot, made (over the soonest to end) if none,
+   its end the later of the two. */
+static void bans_put(const char* hex, time_t until)
+{
+	int i, slot = -1, soonest = 0;
+	for (i = 0; i < HEARTBEAT_BANS_MAX; i++)
+	{
+		if (g_bans[i].hex[0] && strcmp(g_bans[i].hex, hex) == 0)
+		{
+			if (until > g_bans[i].until) g_bans[i].until = until;
+			return;
+		}
+		if (!g_bans[i].hex[0]) { if (slot < 0) slot = i; }
+		else if (g_bans[i].until < g_bans[soonest].until) soonest = i;
+	}
+	if (slot < 0) slot = soonest;
+	snprintf(g_bans[slot].hex, sizeof(g_bans[slot].hex), "%s", hex);
+	g_bans[slot].until = until;
+}
+
+static void bans_expire(time_t now)
+{
+	int i;
+	for (i = 0; i < HEARTBEAT_BANS_MAX; i++)
+		if (g_bans[i].hex[0] && g_bans[i].until <= now)
+			g_bans[i].hex[0] = '\0';
+}
+
+/* With g_lock held: the bans as the body's list, {"h":"...","left":n}
+   each; the count. */
+static int bans_list(char* out, size_t outSize, time_t now)
+{
+	size_t used = 0;
+	int i, count = 0;
+	out[0] = '\0';
+	for (i = 0; i < HEARTBEAT_BANS_MAX; i++)
+	{
+		if (!g_bans[i].hex[0] || g_bans[i].until <= now) continue;
+		if (used + 48 >= outSize) break;
+		used += (size_t)snprintf(out + used, outSize - used, "%s{\"h\":\"%s\",\"left\":%ld}",
+			count ? "," : "", g_bans[i].hex, (long)(g_bans[i].until - now));
+		count++;
+	}
+	return count;
+}
+
+/* The site's list out of the reply: every {"h":"<16 hex>","left":n} after
+   "bans", kept with its end (bounded: the reply is REPLY_MAX at most, a
+   hash 16 lowercase hex characters, left capped at CHEAT_BAN_SECONDS). */
+static void bans_from_reply(time_t now)
+{
+	const char* p = strstr(g_reply, "\"bans\"");
+	int taken = 0;
+	if (!p) return;
+	MUTEX_LOCK(&g_lock);
+	while ((p = strstr(p, "{\"h\":\"")) != NULL && taken < HEARTBEAT_BANS_MAX)
+	{
+		char hex[BAN_HEX_LEN + 1];
+		long left = 0;
+		int i, ok = 1;
+		p += 6;
+		for (i = 0; i < BAN_HEX_LEN; i++)
+		{
+			char c = p[i];
+			if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { ok = 0; break; }
+			hex[i] = c;
+		}
+		hex[BAN_HEX_LEN] = '\0';
+		if (!ok || strncmp(p + BAN_HEX_LEN, "\",\"left\":", 10) != 0) continue;
+		left = strtol(p + BAN_HEX_LEN + 10, NULL, 10);
+		if (left <= 0) continue;
+		if (left > CHEAT_BAN_SECONDS) left = CHEAT_BAN_SECONDS;
+		bans_put(hex, now + left);
+		taken++;
+	}
+	MUTEX_UNLOCK(&g_lock);
+}
+
+void Heartbeat_BanPublish(unsigned int host)
+{
+	char hex[BAN_HEX_LEN + 1];
+	if (!g_running) return;
+	ban_hash(host, hex);
+	MUTEX_LOCK(&g_lock);
+	bans_put(hex, time(NULL) + CHEAT_BAN_SECONDS);
+	MUTEX_UNLOCK(&g_lock);
+}
+
+int Heartbeat_Banned(unsigned int host)
+{
+	char hex[BAN_HEX_LEN + 1];
+	time_t now = time(NULL);
+	int i, banned = 0;
+	if (!g_running) return 0;
+	ban_hash(host, hex);
+	MUTEX_LOCK(&g_lock);
+	for (i = 0; i < HEARTBEAT_BANS_MAX; i++)
+		if (g_bans[i].hex[0] && g_bans[i].until > now && strcmp(g_bans[i].hex, hex) == 0) { banned = 1; break; }
+	MUTEX_UNLOCK(&g_lock);
+	return banned;
 }
 
 /* -------------------------------------------------- players seen, 7 days */
@@ -264,6 +395,20 @@ static void seen_hash(unsigned int host, const char* name, char outHex[SEEN_HEX_
 
 	snprintf(msg, sizeof(msg), "%lld|%08x|%s",
 		(long long)(time(NULL) / SEEN_WINDOW_SEC), host, name ? name : "");
+	hmac_sha256(g_seenKey[0] ? g_seenKey : g_secret, msg, full);
+	memcpy(outHex, full, SEEN_HEX_LEN);
+	outHex[SEEN_HEX_LEN] = '\0';
+}
+
+/* HMAC(key, "ban|<address>"), first 8 bytes as hex (1115): the anti-cheat
+   bans' hash, the same on every server with the shared key, no date in it.
+   Said at start-up when there is no shared key: bans then match this
+   server's own alone. */
+static void ban_hash(unsigned int host, char outHex[BAN_HEX_LEN + 1])
+{
+	char msg[32];
+	char full[65];
+	snprintf(msg, sizeof(msg), "ban|%08x", host);
 	hmac_sha256(g_seenKey[0] ? g_seenKey : g_secret, msg, full);
 	memcpy(outHex, full, SEEN_HEX_LEN);
 	outHex[SEEN_HEX_LEN] = '\0';
@@ -393,7 +538,7 @@ void Heartbeat_SeenName(void* handle, unsigned int host, const char* name)
 }
 
 static void build_json(const OctrStatus* s, const char* seenList, int seenCount, const char* weekList, int weekCount,
-	char* out, size_t outSize)
+	const char* bansList, char* out, size_t outSize)
 {
 	int i;
 	size_t used;
@@ -415,7 +560,11 @@ static void build_json(const OctrStatus* s, const char* seenList, int seenCount,
 			seenCount + weekCount);
 
 	if (used < outSize)
-		snprintf(out + used, outSize - used, "%s]}", weekList);
+		used += (size_t)snprintf(out + used, outSize - used, "%s],\"bans\":[", weekList);
+
+	/* the anti-cheat bans (1115): the site keeps the union and sends it back */
+	if (used < outSize)
+		snprintf(out + used, outSize - used, "%s]}", bansList);
 }
 
 static void post_once(void)
@@ -426,7 +575,8 @@ static void post_once(void)
 	   ts and nonce. */
 	static char seenList[OCTR_HEARTBEAT_SEEN_MAX * (SEEN_HEX_LEN + 3) + 16];
 	static char weekList[OCTR_HEARTBEAT_SEEN_MAX * (SEEN_HEX_LEN + 3) + 16];
-	static char body[sizeof(seenList) + 2048];
+	static char bansList[HEARTBEAT_BANS_MAX * 48 + 16];
+	static char body[sizeof(seenList) + sizeof(bansList) + 2048];
 	static char signing[sizeof(body) + 256];
 	int seenCount, weekCount;
 	char sig[65];
@@ -446,10 +596,12 @@ static void post_once(void)
 	seen_expire(time(NULL));
 	seenCount = seen_list(seenList, sizeof(seenList), time(NULL), 1);
 	weekCount = seen_list(weekList, sizeof(weekList), time(NULL), 0);
+	bans_expire(time(NULL));
+	bans_list(bansList, sizeof(bansList), time(NULL));
 	MUTEX_UNLOCK(&g_lock);
 
 	ts = (long long)time(NULL);
-	build_json(&snapshot, seenList, seenCount, weekList, weekCount, body, sizeof(body));
+	build_json(&snapshot, seenList, seenCount, weekList, weekCount, bansList, body, sizeof(body));
 
 	/* Sign id + ts + nonce + body together. Binding all four means a captured
 	   request cannot be replayed against a different server id or a later
@@ -488,8 +640,12 @@ static void post_once(void)
 	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
 
+	g_replyLen = 0;
+	g_reply[0] = '\0';
 	rc = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+	if (rc == CURLE_OK && httpCode == 200)
+		bans_from_reply(time(NULL));   /* every server's anti-cheat bans (1115) */
 
 	/* Only complain on failure. A healthy heartbeat must stay silent or it
 	   drowns the room logs. */
@@ -569,6 +725,8 @@ int Heartbeat_Init(void)
 	snprintf(g_url, sizeof(g_url), "%s", url);
 	snprintf(g_id, sizeof(g_id), "%s", (id && *id) ? id : "unknown");
 	snprintf(g_seenKey, sizeof(g_seenKey), "%s", (seenKey && *seenKey) ? seenKey : "");
+	if (!g_seenKey[0])
+		printf("Heartbeat: no OCTR_HEARTBEAT_SEEN_KEY: the anti-cheat bans shared through the site will not match the other servers'\n");
 
 	if (iv && *iv)
 	{
@@ -664,5 +822,7 @@ void  Heartbeat_Publish(const OctrStatus* s)        { (void)s; }
 void  Heartbeat_Shutdown(void)                      { }
 void* Heartbeat_SeenConnect(unsigned int host)      { (void)host; return NULL; }
 void  Heartbeat_SeenName(void* h, unsigned int host, const char* n) { (void)h; (void)host; (void)n; }
+void  Heartbeat_BanPublish(unsigned int host)       { (void)host; }
+int   Heartbeat_Banned(unsigned int host)           { (void)host; return 0; }
 
 #endif /* OCTR_HEARTBEAT */

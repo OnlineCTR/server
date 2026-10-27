@@ -17,14 +17,16 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory(enet)
 
 # Source files. global.h - the protocol header shared with the ROM and the PC
-# client - and SV_config.h sit next to them.
-set(SOURCES SV_main.c SV_helper.c SV_heartbeat.c)
+# client - and SV_config.h sit next to them. SV_auth.c is the signed join
+# (1115), with Monocypher (monocypher/, vendored) for the Ed25519 check; on
+# Windows its nonces come from bcrypt.
+set(SOURCES SV_main.c SV_helper.c SV_heartbeat.c SV_auth.c monocypher/monocypher.c monocypher/monocypher-ed25519.c)
 
 add_executable(ctr_srv ${SOURCES})
 target_include_directories(ctr_srv PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/enet/include)
 target_link_libraries(ctr_srv enet)
 if (WIN32)
-    target_link_libraries(ctr_srv winmm ws2_32)
+    target_link_libraries(ctr_srv winmm ws2_32 bcrypt)
 endif()
 
 # Outbound status heartbeat (optional).

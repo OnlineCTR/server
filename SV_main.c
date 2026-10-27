@@ -39,7 +39,7 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1114
+#define SV_PROTOCOL 1115
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
@@ -100,6 +100,7 @@
 #include "SV_config.h"
 
 #include "SV_heartbeat.h"
+#include "SV_auth.h"
 
 #ifdef _MSC_VER
 #pragma comment (lib, "Ws2_32.lib")
@@ -606,6 +607,8 @@ void SendRoomData(ENetPeer* peer)
 	mr.type = SG_ROOMS;
 	mr.numRooms = 16;
 	mr.version = SERVER_VERSION;
+	// this connection's nonce, what its joins must sign (1115, SV_auth.c)
+	memcpy(mr.nonce, Auth_Nonce(peer), OCTR_AUTH_NONCE_LEN);
 
 
 // The players in each room, and in closedMask the rooms that cannot be
@@ -701,6 +704,10 @@ static int OctrQuery_Intercept(ENetHost* host, ENetEvent* event)
 	memcpy(&q, host->receivedData, sizeof(q));
 	if (memcmp(q.magic, OCTR_QUERY_MAGIC, OCTR_MAGIC_LEN) != 0)
 		return 0;
+	// past QUERY_PER_IP_PER_SEC from one address: taken (not ENet's) and
+	// unanswered (Guard_Query, SV_auth.c)
+	if (!Guard_Query(host->receivedAddress.host))
+		return 1;
 
 	memset(&r, 0, sizeof(r));
 	memcpy(r.magic, OCTR_REPLY_MAGIC, OCTR_MAGIC_LEN);
@@ -2715,6 +2722,7 @@ static size_t MinPacketSize(int type)
 		case CG_HOSTACTION: return sizeof(struct CG_MessageHostAction);
 		case CG_VOTE:       return sizeof(struct CG_MessageVote);
 		case CG_WATCH:      return sizeof(struct CG_MessageWatch);
+		case CG_CHEAT:      return sizeof(struct CG_MessageCheat);
 		default:           return (size_t)-1;
 	}
 }
@@ -3384,6 +3392,30 @@ STATIC_ASSERT2(sizeof(struct CG_MessageVote) <= MAX_PACKET_BYTES, "MAX_PACKET_BY
 STATIC_ASSERT2(sizeof(struct CG_MessageEndRace) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageEndRace");
 STATIC_ASSERT2(sizeof(struct CG_MessageWatch) <= MAX_PACKET_BYTES, "MAX_PACKET_BYTES: CG_MessageWatch");
 
+// The client's anti-cheat tripped (CG_CHEAT, 1115: its checks of the game's
+// code and ModsC in RAM and of the game's cheat codes, CHEAT_REASON_*). The
+// player is removed with DISCONNECT_REASON_CHEAT (KICKED BY ANTI-CHEAT on
+// their screen), the address barred for CHEAT_BAN_SECONDS here
+// (Auth_BarCheat) and, through the site, on every server
+// (Heartbeat_BanPublish). Said in the log with the seat's name when it has
+// one. A spectator's or a room-list connection's counts the same.
+static void AntiCheat_Trip(ENetPeer* peer, RoomInfo* ri, int peerID, int reason)
+{
+	union { enet_uint32 ip; unsigned char b[4]; } u;
+	static const char* const what[] = { "?", "the game's code", "ModsC", "the game's cheat codes" };
+	u.ip = peer->address.host;
+	PrintPrefix(peerID == -1 ? -1 : (int)(ri - roomInfos) + 1);
+	if (peerID == -1)
+		printf("Anti-cheat: a connection from [%d.%d.%d.%d] tripped on %s (%d): removed\n",
+			u.b[0], u.b[1], u.b[2], u.b[3], what[reason < 4 ? reason : 0], reason);
+	else
+		printf("Anti-cheat: %.*s (%d) from [%d.%d.%d.%d] tripped on %s (%d): removed\n",
+			NAME_LEN, &ri->peerInfos[peerID].name[0], peerID, u.b[0], u.b[1], u.b[2], u.b[3], what[reason < 4 ? reason : 0], reason);
+	Auth_BarCheat(peer->address.host);
+	Heartbeat_BanPublish(peer->address.host);
+	enet_peer_disconnect(peer, DISCONNECT_REASON_CHEAT);
+}
+
 void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 	int peerID = -1;
@@ -3397,12 +3429,20 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 	// nibble is read here, and only from a message with a byte in it.
 	if (!Rate_Take(peer, packet->dataLength ? ((struct CG_Header*)packet->data)->type : -1))
 		return;
+	Guard_Stamp(peer);   // heard from (the room list's silence, Guard_Silent)
 
-	// Length before anything past the type nibble is read.
+	// Length before anything past the type nibble is read. A type the
+	// protocol has not got, or a message too short for its type, is nothing
+	// a client of this release sends (Suspect, SV_auth.c: a run of them and
+	// the connection goes).
 	if (packet->dataLength < sizeof(struct CG_Header))
 		return;
 	if (packet->dataLength < MinPacketSize(((struct CG_Header*)packet->data)->type))
+	{
+		if (Suspect(peer, "a type the protocol has not got, or too short for its type"))
+			enet_peer_disconnect(peer, 0);
 		return;
+	}
 
 	//identify which client ID this came from
 	GetDriverFromRace(peer, &ri, &peerID);
@@ -3411,7 +3451,9 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 	char sgBuffer[SG_BUFFER_BYTES];
 	memset(sgBuffer, 0, sizeof(sgBuffer));
 
-	if (((struct CG_Header*)recvBuf)->type != CG_JOINROOM)
+	// (a CG_CHEAT too, 1115: the client's anti-cheat trips on the room list as
+	// in a room)
+	if (((struct CG_Header*)recvBuf)->type != CG_JOINROOM && ((struct CG_Header*)recvBuf)->type != CG_CHEAT)
 	{
 		if (peerID == -1)
 			return;
@@ -3446,6 +3488,23 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				PrintPrefix(-1);
 				printf("Join refused (client expects server %u and this is %u)\n", (unsigned)r->version, (unsigned)SERVER_VERSION);
 				SendRoomData(peer);
+				return;
+			}
+
+			// The launcher's signature over this connection's nonce (1115,
+			// SV_auth.c): without a good one this is no official client, and
+			// nothing of its goes further - the room list back, as for the
+			// version, and a few refusals bar the address for a while.
+			if (!Auth_Check(peer, r))
+			{
+				union { enet_uint32 ip; unsigned char b[4]; } u;
+				u.ip = peer->address.host;
+				PrintPrefix(-1);
+				printf("Join refused (unofficial client: bad signature) from [%d.%d.%d.%d]\n", u.b[0], u.b[1], u.b[2], u.b[3]);
+				if (Auth_Refused(peer))
+					enet_peer_disconnect(peer, 0);
+				else
+					SendRoomData(peer);
 				return;
 			}
 
@@ -3771,7 +3830,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				// Clamped rather than refused, for the reason above: a refusal
 				// strands the host. (Mode rooms alone up to 1111.)
 				if (trackID >= VOTE_TRACKS)
+				{
 					trackID = VOTE_TRACKS - 1;
+					if (Suspect(peer, "a track past the race tracks")) { enet_peer_disconnect(peer, 0); break; }
+				}
 
 				// ELIMINATION and TAG have no lap pick (Room_NoLapPick): row 0,
 				// whatever the host's lap menu sent.
@@ -3879,6 +3941,12 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			struct CG_MessageHostAction* r = (struct CG_MessageHostAction*)recvBuf;
 			int target = r->clientID;
 			ENetPeer* tp = (target < MAX_CLIENTS) ? ri->peerInfos[target].peer : 0;
+
+			if (r->action != HOST_ACTION_KICKVOTE && r->action != HOST_ACTION_KICKUNVOTE &&
+				r->action != HOST_ACTION_VOTING && r->action != HOST_ACTION_GIVE)
+			{
+				if (Suspect(peer, "a host action the protocol has not got")) { enet_peer_disconnect(peer, 0); break; }
+			}
 
 			// A vote to kick, cast or taken back, from any seat. Refused
 			// (KICKVOTE_REFUSED) once the room is loading (a vote crossing
@@ -4027,11 +4095,22 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			struct CG_MessageVote* r = (struct CG_MessageVote*)recvBuf;
 			int options = ri->votePhase == VOTE_TRACK ? VOTE_TRACKS : VOTE_LAP_ROWS;
 
+			if (ri->votePhase != VOTE_NONE && r->phase == ri->votePhase && r->option >= options)
+			{
+				if (Suspect(peer, "a vote for an option the vote has not got")) enet_peer_disconnect(peer, 0);
+				break;
+			}
 			if (ri->votePhase == VOTE_NONE || r->phase != ri->votePhase || r->option >= options)
 				break;
 			ri->peerInfos[peerID].vote = (unsigned char)(r->option + 1);
 			Vote_Broadcast(ri);
 			break;
+		}
+
+		case CG_CHEAT:
+		{
+			AntiCheat_Trip(peer, ri, peerID, ((struct CG_MessageCheat*)recvBuf)->reason);
+			return;
 		}
 
 		case CG_WATCH:
@@ -4177,6 +4256,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// machine spawns the weapon there and knows it by them
 			s->held = r->held;
 			s->serial = r->serial;
+			if (r->target > MAX_CLIENTS && Suspect(peer, "a weapon's target past the seats")) { enet_peer_disconnect(peer, 0); break; }
 			s->target = (r->target <= MAX_CLIENTS) ? r->target : 0;
 			memcpy(&s->pos[0], &r->pos[0], sizeof(s->pos));
 			s->angle = r->angle;
@@ -4219,12 +4299,20 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			int kind = r->kind;
 
 			if (!ri->boolRaceAll) break;   // as CG_WEAPON
-			if (kind >= NET_EV_COUNT) break;
+			if (kind >= NET_EV_COUNT)
+			{
+				if (Suspect(peer, "a weapon event the protocol has not got")) enet_peer_disconnect(peer, 0);
+				break;
+			}
 
 			// the referee's verdicts (NET_EV_OUT, NET_EV_IT) are the server's
 			// to give: one from a client would put a player out, or make one
-			// "it", on every screen
-			if ((NET_EV_SERVER_MASK >> kind) & 1) break;
+			// "it", on every screen - and the server's ping (NET_EV_PING)
+			if ((NET_EV_SERVER_MASK >> kind) & 1)
+			{
+				if (Suspect(peer, "a weapon event only the server sends")) enet_peer_disconnect(peer, 0);
+				break;
+			}
 
 			// ELIMINATION's lap reports: for the referee alone (Elim_OnLap,
 			// which ignores them in any other room), relayed to nobody
@@ -4245,7 +4333,11 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			{
 				// 4 bits on the wire, fewer seats: past them would index weaponFate
 				// into the next room
-				if (r->owner >= MAX_CLIENTS) break;
+				if (r->owner >= MAX_CLIENTS)
+				{
+					if (Suspect(peer, "a weapon event's owner past the seats")) enet_peer_disconnect(peer, 0);
+					break;
+				}
 				unsigned char* fate = &ri->weaponFate[(r->owner << 8) | r->serial];
 
 				int rn = 0;
@@ -4342,6 +4434,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 			int localTime = 0;
 			memcpy(&localTime, &r->courseTime, sizeof(r->courseTime));
+			if (localTime <= 0 || localTime > 0xe100 * 600)
+			{
+				if (Suspect(peer, "a finish time no race has")) enet_peer_disconnect(peer, 0);
+			}
 
 			char timeStr[32];
 			snprintf(
@@ -4429,13 +4525,44 @@ void ProcessNewMessages() {
 				ipBytes.ip = ip;
 
 				// a new connection in this slot: its buckets full again
-				// (Rate_*), whatever becomes of it below
+				// (Rate_*), whatever becomes of it below, and its nonce for
+				// the signed join (1115, SV_auth.c)
 				Rate_Reset(event.peer);
+				Auth_Connect(event.peer);
 
-				if (AnyMatchIPBanL(ip)) //if this IP is banned
+				// a connection flood (Guard_Connect, SV_auth.c): too many from
+				// this address this minute (barred), or too many from everywhere
+				// this second (refused)
+				int flood = Guard_Connect(ip);
+				if (flood)
+				{
+					if (flood == 1)
+					{
+						PrintPrefix(-1);
+						printf("Too many connections from IP [%d.%d.%d.%d] this minute (limit %d), rejected\n", ipBytes.bytes[0], ipBytes.bytes[1], ipBytes.bytes[2], ipBytes.bytes[3], CONNECT_PER_IP_PER_MINUTE);
+					}
+					enet_peer_disconnect_now(event.peer, 0);
+				}
+				else if (AnyMatchIPBanL(ip)) //if this IP is banned
 				{
 					PrintPrefix(-1);
 					printf("Banned player @ IP [%d.%d.%d.%d] attempted to connect, rejected\n", ipBytes.bytes[0], ipBytes.bytes[1], ipBytes.bytes[2], ipBytes.bytes[3]);
+					enet_peer_disconnect_now(event.peer, 0);
+				}
+				// barred for its joins' signatures or its messages a short
+				// while ago (Auth_Barred, SV_auth.c)
+				else if (Auth_Barred(ip))
+				{
+					PrintPrefix(-1);
+					printf("Barred address [%d.%d.%d.%d] attempted to connect, rejected\n", ipBytes.bytes[0], ipBytes.bytes[1], ipBytes.bytes[2], ipBytes.bytes[3]);
+					enet_peer_disconnect_now(event.peer, 0);
+				}
+				// barred for cheating on another server, by the site's list
+				// (Heartbeat_Banned, 1115)
+				else if (Heartbeat_Banned(ip))
+				{
+					PrintPrefix(-1);
+					printf("Anti-cheat banned address [%d.%d.%d.%d] (from the site's list) attempted to connect, rejected\n", ipBytes.bytes[0], ipBytes.bytes[1], ipBytes.bytes[2], ipBytes.bytes[3]);
 					enet_peer_disconnect_now(event.peer, 0);
 				}
 				// One address cannot hold the whole server: the host has
@@ -5090,6 +5217,9 @@ void ServerState_FirstBoot(int argc, char** argv)
 	Backfill_Init(port);
 #endif
 
+	// The signed join (1115): the mode said, the nonces seeded (SV_auth.c)
+	Auth_Init();
+
 	// Outbound status heartbeat. No-op unless OCTR_HEARTBEAT_URL and
 	// OCTR_HEARTBEAT_SECRET are both set, and compiled out entirely when the
 	// build has no libcurl.
@@ -5261,6 +5391,32 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 	RoomList_Dirty();   // race over: everybody's list
 }
 
+// (RoomList_SilentSweep's walk: ForeachPeerLPL takes a plain function)
+static void RoomList_SilentOne(ENetPeer* peer)
+{
+	RoomInfo* ri = &roomInfos[0];
+	int peerID = -1;
+	if (peer == 0 || peer->state != ENET_PEER_STATE_CONNECTED) return;
+	GetDriverFromRace(peer, &ri, &peerID);
+	if (peerID != -1 || !Guard_Silent(peer)) return;
+	{
+		union { enet_uint32 ip; unsigned char b[4]; } u;
+		u.ip = peer->address.host;
+		PrintPrefix(-1);
+		printf("Room list connection from [%d.%d.%d.%d] silent for %ds, disconnected\n", u.b[0], u.b[1], u.b[2], u.b[3], ROOMLIST_SILENT_SECONDS);
+	}
+	enet_peer_disconnect(peer, 0);   // (deferred: the list is not changed under the walk)
+}
+
+static void RoomList_SilentSweep(void)
+{
+	static enet_uint32 lastAt = 0;
+	enet_uint32 now = enet_time_get();
+	if (lastAt != 0 && (enet_uint32)(now - lastAt) < 1000) return;
+	lastAt = now ? now : 1;
+	ForeachPeerLPL(RoomList_SilentOne);
+}
+
 void ServerState_Tick()
 {
 	ProcessNewMessages();
@@ -5270,6 +5426,11 @@ void ServerState_Tick()
 	// a kick's time up: that room open to its player again on their list
 	if (KickBan_Expire())
 		RoomList_Dirty();
+
+	// a connection on the room list that has sent nothing for
+	// ROOMLIST_SILENT_SECONDS: disconnected (a bot holding a slot; the client
+	// asks for the list every 5 s). Once a second.
+	RoomList_SilentSweep();
 
 	for (int r = 0; r < 16; r++)
 	{

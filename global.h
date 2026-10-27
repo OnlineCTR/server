@@ -25,8 +25,8 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1114
-#define SERVER_VERSION 1114
+#define VERSION 1115
+#define SERVER_VERSION 1115
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
 // defined before it includes this header; 1111). One from another release
@@ -208,9 +208,30 @@
 #define IP_ADDRESS_SIZE		            16 // assuming IPv4 (which is "xxx.xxx.xxx.xxx" + '\0')
 #define PORT_SIZE			            6 // the port number as a string (0-65535 + '\0')
 
-// countryNames[] in menu.c: the entry that asks the client for an address
-// (the ROM's "see client window" prompt is only right for this one)
+// countryNames[] in menu.c: the entry whose address the player types on the
+// ROM's keypad (keypad.c, 1115; the client's console prompt until 1115)
 #define PRIVATE_ROOM_INDEX 6
+
+// The private room's address and port, from the ROM's keypad to the client
+// (1115): in the serverPlayers and serverPing slots of PRIVATE_ROOM_INDEX,
+// which have nothing else to hold (the client writes every other slot every
+// loop, never these two). The address is the four octets in order, the first
+// in the low byte (a.b.c.d: a | b << 8 | c << 16 | d << 24); the port word
+// is the port in its low 16 bits with OCTR_PRIVATE_READY above it, set last,
+// after the address, so the client never reads a port without its address.
+// The ROM writes both before it locks the server in (serverLockIn1 = 1 with
+// serverCountry PRIVATE_ROOM_INDEX, as ever); the client reads them then
+// (StatePC_Launch_PickServer) and keeps its own copy for a rejoin.
+#define OCTR_PRIVATE_ADDR(o)  ((o)->serverPlayers[PRIVATE_ROOM_INDEX])
+#define OCTR_PRIVATE_PORT(o)  ((o)->serverPing[PRIVATE_ROOM_INDEX])
+#define OCTR_PRIVATE_READY    0x10000
+
+// The signed join (1115): the room list's nonce, the join's signature and
+// what is signed - the nonce, then SERVER_VERSION as two bytes, low first.
+// The whole story is under CG_MessageRoom.
+#define OCTR_AUTH_NONCE_LEN 16
+#define OCTR_AUTH_SIG_LEN   64
+#define OCTR_AUTH_MSG_LEN   (OCTR_AUTH_NONCE_LEN + 2)
 
 // A server's 16 rooms: the room list's two pages (menu.c), the same eight
 // kinds on each, named by their row: NO ITEMS 1, CLASSIC 2, POTION GAME 3,
@@ -627,12 +648,15 @@ struct OnlineCTR
 	int backRequest;
 
 	// The launcher's options, written by the PC client every frame from its
-	// command line (--music, --sfx, --menu-music; CL_main.cpp), so they
-	// survive the entry hook's memset: the music and sound effect volumes
-	// as percentages, what plays in the menus (MENU_MUSIC_*, below), and a
-	// flag that says the three are in, since zeros would otherwise read as
-	// silence. Applied by the ROM every frame (Options_Apply, options.c).
-	// Same placement rule: appended, ints after ints, no padding.
+	// command line (--music, --sfx, --voice, --menu-music; CL_main.cpp), so
+	// they survive the entry hook's memset: the music and sound effect
+	// volumes as percentages, what plays in the menus (MENU_MUSIC_*, below),
+	// and a flag that says the three are in, since zeros would otherwise
+	// read as silence. Applied by the ROM every frame (Options_Apply,
+	// options.c). Same placement rule: appended, ints after ints, no padding.
+	// The voice volume has no field of its own (the struct is full): it is
+	// sfxVolume's second byte, the percentage + 1, 0 when none was given (a
+	// launcher from before it), and the voices then follow the effects.
 	int musicVolume;
 	int sfxVolume;
 	int menuMusic;
@@ -687,8 +711,10 @@ struct OnlineCTR
 	// Players on each server by its octr->serverCountry number, from the
 	// site's status feed (PlayersOnline_Tick, CL_main.cpp), beside each
 	// region on the server list (ServerList_Rows, home.c). -1 where the
-	// feed has nothing to say (not fetched yet, the site unreachable, the
-	// private room, Beta). Written by the client every loop.
+	// feed has nothing to say (not fetched yet, the site unreachable, Beta).
+	// Written by the client every loop - every slot but PRIVATE_ROOM_INDEX's,
+	// which holds the private room's address from the ROM's keypad (1115,
+	// OCTR_PRIVATE_ADDR).
 	int serverPlayers[8];
 
 	// The lobby's OPTIONS (hostOptions.c): the host's CHANGE HOST, anybody's
@@ -713,8 +739,9 @@ struct OnlineCTR
 	// with nothing to show yet, PING_NA where the last ask went unanswered
 	// (an old server that does not answer the query, one down), PING_UPDATE
 	// where the answer named another SERVER_VERSION; -1 too for those never
-	// asked: a server not open, the private room. Written by the client
-	// every loop.
+	// asked: a server not open. Written by the client every loop - every slot
+	// but PRIVATE_ROOM_INDEX's, which holds the private room's port from the
+	// ROM's keypad (1115, OCTR_PRIVATE_PORT).
 	int serverPing[8];
 
 	// The room's vote for the track and laps (vote.c), from the server's
@@ -901,11 +928,12 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define BACK_LEAVE_ROOM    1  // drop the connection; the ROM re-picks the same server, so the room list comes back
 #define BACK_LEAVE_SERVER  2  // drop the connection; back to the server list
 #define BACK_CANCEL_TRACK  3  // host in the character pick: CG_TRACKCANCEL, the whole room goes back to the lap pick
-#define BACK_CANCEL_CONNECT 4 // the private room's address prompt: the client takes it down (and drops a connection it had begun); back to the server list
+#define BACK_CANCEL_CONNECT 4 // the private room's connection (its address from the ROM's keypad, 1115): the client drops a connection it had begun; back to the server list
 
 // octr->kickedNotice
 #define KICKED_NOTICE_VOTE 1   // KICKED BY VOTE, on the room list it rejoins (KICKED_NOTICE_HOST, the host's KICK PLAYER, up to 1109)
 #define KICKED_NOTICE_IDLE 2   // KICKED FOR IDLING, on the server list
+#define KICKED_NOTICE_CHEAT 3  // KICKED BY ANTI-CHEAT (1115), on the server list it lands on - the client's own detection, or the server's DISCONNECT_REASON_CHEAT
 
 // octr->special (1110)
 #define OCTR_SPECIAL_SPECTATOR 1   // watching a race joined in progress (NEWCLIENT_SPECTATOR): the own kart parked off the track, hidden and finished, the camera on the racers (spectate.c)
@@ -1209,6 +1237,7 @@ enum ServerGiveMessageType
 // it was dropped (0 is the plain disconnect everything else uses).
 #define DISCONNECT_REASON_IDLE 1
 #define DISCONNECT_REASON_KICKED 2   // the room's vote to kick (CG_HOSTACTION's KICKVOTE; the host's KICK PLAYER up to 1109)
+#define DISCONNECT_REASON_CHEAT 3    // the client's anti-cheat tripped (CG_CHEAT, 1115): the address barred for CHEAT_BAN_SECONDS on every server
 
 // variety of opcodes (start load / start race)
 struct SG_Header
@@ -1305,7 +1334,7 @@ struct SG_MessageRooms
 	// its load, not near the forced return to the lobby), less the rooms this
 	// player was voted out of a short while ago - octr->clientCount's
 	// ROOM_SPECTATE. Read, as racingMask below, only once the version above
-	// has passed: the list is 18 bytes from 1111 on.
+	// has passed: the list is 18 bytes from 1111 on, 34 from 1115.
 	unsigned short spectateMask;
 
 	// bit N: room N+1 is in a race now (1111, RoomInRace): loading, at the
@@ -1316,7 +1345,11 @@ struct SG_MessageRooms
 	// Every bit of spectateMask is set here too.
 	unsigned short racingMask;
 
-	// 18 bytes total
+	// This connection's nonce (1115), the same in every list sent to it: what
+	// the client's join must sign (OCTR_AUTH_*, below CG_MessageRoom).
+	unsigned char nonce[OCTR_AUTH_NONCE_LEN];
+
+	// 18 + OCTR_AUTH_NONCE_LEN bytes total (18 up to 1115)
 };
 
 // sent to each user when someone connects
@@ -1532,7 +1565,7 @@ STATIC_ASSERT2(sizeof(struct SG_Header) == 1, "Size of SG_Header must be 1 byte"
 STATIC_ASSERT2(sizeof(struct SG_MessageHost) == 1, "Size of SG_MessageHost must be 1 byte");
 STATIC_ASSERT2(sizeof(struct SG_MessageVote) == 3 + MAX_NUM_PLAYERS, "Size of SG_MessageVote must be 3 + MAX_NUM_PLAYERS bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageKickVote) == 4, "Size of SG_MessageKickVote must be 4 bytes");
-STATIC_ASSERT2(sizeof(struct SG_MessageRooms) == 18, "Size of SG_MessageRooms must be 18 bytes");
+STATIC_ASSERT2(sizeof(struct SG_MessageRooms) == 18 + OCTR_AUTH_NONCE_LEN, "Size of SG_MessageRooms must be 18 + OCTR_AUTH_NONCE_LEN bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageClientStatus) == 2, "Size of SG_MessageClientStatus must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageName) == 2 + NAME_LEN + 1, "Size of SG_MessageName must be 2 + NAME_LEN + 1 bytes");
 STATIC_ASSERT2(sizeof(struct SG_MessageCharacter) == 2, "Size of SG_MessageCharacter must be 2 bytes");
@@ -1548,11 +1581,13 @@ STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageEndRace, flags) == 1, "SG_Mes
 STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageEndRace, courseTime) == 4, "SG_MessageEndRace layout: courseTime");
 STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageRooms, spectateMask) == 14, "SG_MessageRooms layout: spectateMask");
 STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageRooms, racingMask) == 16, "SG_MessageRooms layout: racingMask");
+STATIC_ASSERT2(__builtin_offsetof(struct SG_MessageRooms, nonce) == 18, "SG_MessageRooms layout: nonce");
 #else
 STATIC_ASSERT2(offsetof(struct SG_MessageEndRace, flags) == 1, "SG_MessageEndRace layout: flags");
 STATIC_ASSERT2(offsetof(struct SG_MessageEndRace, courseTime) == 4, "SG_MessageEndRace layout: courseTime");
 STATIC_ASSERT2(offsetof(struct SG_MessageRooms, spectateMask) == 14, "SG_MessageRooms layout: spectateMask");
 STATIC_ASSERT2(offsetof(struct SG_MessageRooms, racingMask) == 16, "SG_MessageRooms layout: racingMask");
+STATIC_ASSERT2(offsetof(struct SG_MessageRooms, nonce) == 18, "SG_MessageRooms layout: nonce");
 #endif
 STATIC_ASSERT2(sizeof(struct SG_MessageLobbyCountdown) == 2, "Size of SG_MessageLobbyCountdown must be 2 bytes");
 
@@ -1608,6 +1643,12 @@ enum ClientGiveMessageType
 	// and tells them (SG_LOBBYCOUNTDOWN's LOBBYCOUNT_WATCHERS)
 	CG_WATCH,
 
+	// (1115) the client's own anti-cheat tripped (CG_MessageCheat: the
+	// CHEAT_REASON_*): the server removes the player with
+	// DISCONNECT_REASON_CHEAT, bars the address for CHEAT_BAN_SECONDS and
+	// tells the site, which tells every other server (SV_heartbeat.c)
+	CG_CHEAT,
+
 	CG_COUNT
 };
 
@@ -1642,10 +1683,29 @@ struct CG_MessageRoom
 	// a quick lock-in used to get a join request out - and accepted - before
 	// it arrived.
 	unsigned short version;
+
+	// The launcher's signature over this connection's nonce and the version
+	// above (1115, OCTR_AUTH_*, below): the server refuses a join without a
+	// good one. Zeros from a client run without the launcher, which only a
+	// server told to take unsigned joins (OCTR_OPEN_SERVER) accepts.
+	unsigned char sig[OCTR_AUTH_SIG_LEN];
 };
 
 // CG_MessageRoom.flags (1110)
 #define JOIN_SPECTATE 1
+
+// The signed join (1115). The server draws a nonce for every connection and
+// sends it in each SG_MessageRooms to it; a CG_MessageRoom must carry an
+// Ed25519 signature over OCTR_AUTH_MSG_LEN bytes - the nonce, then the
+// client's SERVER_VERSION as two bytes, low first - made with the release's
+// private key, which the launcher alone holds (it signs for the client over
+// the pipe between them). The server checks it with the release's public key
+// (OCTR_CLIENT_PUBKEY, SV_config.h) and refuses any other join as it refuses
+// another SERVER_VERSION: the room list back, nothing else; a few in a row
+// from one address and it is kept off the server for a while (SV_auth.c).
+// A new key with every SERVER_VERSION. (OCTR_AUTH_NONCE_LEN, OCTR_AUTH_SIG_LEN
+// and OCTR_AUTH_MSG_LEN: with PRIVATE_ROOM_INDEX above, ahead of both
+// structs.)
 
 struct CG_MessageName
 {
@@ -1821,11 +1881,30 @@ struct CG_MessageWatch
 	unsigned char target : 4;   // the client ID watched, WATCH_NOBODY none
 };
 
+// CG_CHEAT (1115): what the client's anti-cheat found (CHEAT_REASON_*)
+struct CG_MessageCheat
+{
+	unsigned char type : 4;     // CG_CHEAT
+	unsigned char reason : 4;   // CHEAT_REASON_*
+};
+
+// CG_MessageCheat.reason: what the client found (RamCheck_*, CL_main.cpp).
+// The game's code in RAM (0x80010000 to its data), or ModsC's code and
+// tables, not as the release built them (a patch: DuckStation's cheats, a
+// memory editor, a modified disc) - checked every two seconds in a server
+// and once more at the character lock-in, against values built into the
+// client (ramRef.h, written by build_release); or the game's own cheat
+// codes (data.cheats at 0x80096B28) set, which the client clears at every
+// join.
+#define CHEAT_REASON_CODE  1
+#define CHEAT_REASON_MODSC 2
+#define CHEAT_REASON_FLAGS 3
+
 #define DRIVER_COURSE_OFFSET 0x514
 #define DRIVER_BESTLAP_OFFSET 0x63c
 
 STATIC_ASSERT2(sizeof(struct CG_Header) == 1, "Size of CG_Header must be 1 byte");
-STATIC_ASSERT2(sizeof(struct CG_MessageRoom) == 4, "Size of CG_MessageRoom must be 4 bytes");
+STATIC_ASSERT2(sizeof(struct CG_MessageRoom) == 4 + OCTR_AUTH_SIG_LEN, "Size of CG_MessageRoom must be 4 + OCTR_AUTH_SIG_LEN bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageName) == 1 + NAME_LEN + 1, "Size of CG_MessageName must be 1 + NAME_LEN + 1 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageCharacter) == 2, "Size of CG_MessageCharacter must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageTrack) == 2, "Size of CG_MessageTrack must be 2 bytes");
@@ -1836,6 +1915,7 @@ STATIC_ASSERT2(sizeof(struct CG_MessageHostAction) == 2 + NAME_LEN, "Size of CG_
 STATIC_ASSERT2(sizeof(struct CG_MessageVote) == 2, "Size of CG_MessageVote must be 2 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageEndRace) == 12, "Size of CG_MessageEndRace must be 12 bytes");
 STATIC_ASSERT2(sizeof(struct CG_MessageWatch) == 1, "Size of CG_MessageWatch must be 1 byte");
+STATIC_ASSERT2(sizeof(struct CG_MessageCheat) == 1, "Size of CG_MessageCheat must be 1 byte");
 STATIC_ASSERT2(WATCH_NOBODY >= MAX_NUM_PLAYERS, "WATCH_NOBODY no seat");
 STATIC_ASSERT2(CG_COUNT <= 16, "CG_* types: 4 bits on the wire (SPECTATOR_DROPS too)");
 
