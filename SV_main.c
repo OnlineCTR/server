@@ -39,7 +39,7 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1117   // (1115 until 1117: Matt, the numbers match)
+#define SV_PROTOCOL 1119   // (1117 until 1119: Matt, 29 Oct - every player and server on the same game)
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale

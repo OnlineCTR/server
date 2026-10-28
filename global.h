@@ -25,8 +25,8 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1117   // (1116: 28 Oct, the client's checks fixed - no server change, SERVER_VERSION stayed 1115; 1117: the private room's CONNECTING, the spectator's WATCHERS)
-#define SERVER_VERSION 1117   // (1115 until 1117: Matt, 28 Oct - the numbers match; a server release, and a new signing key pair: make_key.py)
+#define VERSION 1119   // (1116: 28 Oct, the client's checks fixed - no server change, SERVER_VERSION stayed 1115; 1117: the private room's CONNECTING, the spectator's WATCHERS; 1118: the region list's count in its title, CONNECTING from it, the watched kart's lap chime - no server change, SERVER_VERSION stays 1117; 1119: the warp orb's near tie at the kart it hits, and SERVER_VERSION 1119 with it)
+#define SERVER_VERSION 1119   // (1117 until 1119: Matt, 29 Oct - a server release so that every player and server updates to the same game; a new signing key pair: make_key.py, launcher 4.4)
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
 // defined before it includes this header; 1111). One from another release
