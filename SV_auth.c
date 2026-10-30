@@ -31,7 +31,9 @@
 extern ENetHost* server;            // SV_main.c
 extern void PrintPrefix(const int roomId);
 
-#if OCTR_CLIENT_PUBKEY_VERSION != SERVER_VERSION
+// SV_config.h's key from this release: the release it names, not the key's
+// own number - a release may keep the last one's key (1121 kept 1119's).
+#if OCTR_CLIENT_PUBKEY_SERVER_VERSION != SERVER_VERSION
 #error "SV_config.h's OCTR_CLIENT_PUBKEY is another release's: this header, global.h and SV_main.c come from one release (see README)"
 #endif
 

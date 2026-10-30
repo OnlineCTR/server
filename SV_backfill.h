@@ -23,7 +23,7 @@
 //     a random vote a few seconds into each vote (SG_VOTE); a random
 //     character locked in a few seconds after the track is in (SG_TRACK),
 //     locked again after a cancel (SG_TRACKCANCEL); made host with voting
-//     off, a random track and laps a few seconds later.
+//     off, a random track, laps and WEAPON TUNING a few seconds later.
 //   - loading (SG_STARTLOADING): CG_STARTRACE a few seconds on, as a
 //     client does once its race has loaded. In a plain race it sends
 //     nothing: its kart sits on the grid, it never finishes, and the room
@@ -501,18 +501,26 @@ static void Bot_OnMessage(Bot* b, int index, const unsigned char* data, size_t s
 			if (r->phase == VOTE_KICK_REPLY)
 				break;
 
-			b->voteEnabled = r->enabled;
-			if (r->phase != b->votePhase)
+			// The room's vote, past the kick reply's test: since NET_VOTING 2
+			// its phase is two fields (SG_VOTE_PHASE), WEAPON TUNING's 4 having
+			// its third bit in phaseHi - which a kick reply's result overlaps,
+			// hence the test above first.
 			{
-				// a vote cut short (PLAYER VOTING off) and started again:
-				// a new vote, in the same phase as the one voted in
-				if (r->phase == VOTE_NONE)
-					b->voted = 0;
-				b->votePhase = r->phase;
-				b->voteAt = (r->phase != VOTE_NONE && b->voted != r->phase && !b->spectating) ? Bot_In(1000, 6000) : 0;
+				int phase = SG_VOTE_PHASE(r);
+
+				b->voteEnabled = r->enabled;
+				if (phase != b->votePhase)
+				{
+					// a vote cut short (PLAYER VOTING off) and started again:
+					// a new vote, in the same phase as the one voted in
+					if (phase == VOTE_NONE)
+						b->voted = 0;
+					b->votePhase = phase;
+					b->voteAt = (phase != VOTE_NONE && b->voted != phase && !b->spectating) ? Bot_In(1000, 6000) : 0;
+				}
+				if (b->isHost && !b->spectating && !b->voteEnabled && phase == VOTE_NONE && !b->trackIn && b->pickAt == 0)
+					b->pickAt = Bot_In(3000, 8000);
 			}
-			if (b->isHost && !b->spectating && !b->voteEnabled && r->phase == VOTE_NONE && !b->trackIn && b->pickAt == 0)
-				b->pickAt = Bot_In(3000, 8000);
 			break;
 		}
 
@@ -841,12 +849,16 @@ static void Backfill_Tick(void)
 		{
 			struct CG_MessageVote m;
 			b->voteAt = 0;
-			if (b->votePhase != VOTE_NONE)
+			// (a random row of the vote running: VOTE_OPTIONS, WEAPON TUNING's
+			// two among them - a row past them is a modified client's to the
+			// server, Suspect; none for a phase this header does not know)
+			int options = VOTE_OPTIONS(b->votePhase);
+			if (b->votePhase != VOTE_NONE && options > 0)
 			{
 				memset(&m, 0, sizeof(m));
 				m.type = CG_VOTE;
 				m.phase = b->votePhase;
-				m.option = (unsigned char)(rand() % (b->votePhase == VOTE_TRACK ? VOTE_TRACKS : VOTE_LAP_ROWS));
+				m.option = (unsigned char)(rand() % options);
 				Bot_Send(b, &m, sizeof(m));
 				b->voted = b->votePhase;
 			}
@@ -862,6 +874,10 @@ static void Backfill_Tick(void)
 				m.type = CG_TRACK;
 				m.trackID = rand() % VOTE_TRACKS;
 				m.lapID = rand() % VOTE_LAP_ROWS;
+				// and a random WEAPON TUNING, as the host's page picks it
+				// (NET_VOTING 2): the server takes BALANCED in a room without
+				// it (Room_NoTuningPick), so every room can be sent either
+				m.tuning = rand() & 1;
 				Bot_Send(b, &m, sizeof(m));
 			}
 		}

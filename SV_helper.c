@@ -4,16 +4,18 @@
 // version 3 (LICENSE), with the additional terms in ADDITIONAL-TERMS under
 // its section 7. It comes with ABSOLUTELY NO WARRANTY.
 
-// The main loop's pause between ticks (SV_main.c): usec microseconds, which
-// the system rounds up to its timer's period (about 1 ms on Windows once
-// ENet has asked for it, enet_initialize; tens of microseconds on Linux and
-// macOS).
+// A pause of usec microseconds, which the system rounds up to its timer's
+// period (about 1 ms on Windows once ENet has asked for it, enet_initialize;
+// tens of microseconds on Linux and macOS). The main loop's pause after a
+// failure of ENet's (ProcessNewMessages, SV_main.c), so that one that
+// repeats cannot spin a core; its pass otherwise waits on the network (next
+// release - SleepMicro(1) between passes until then).
 //
 // Windows - Visual Studio and MinGW alike (_WIN32, which both define; only
 // Server.vcxproj defines __WINDOWS__) - waits on a waitable timer.
 // MinGW-w64's own usleep() is no use there: it is Sleep(usec / 1000), so a
-// pause of a microsecond is Sleep(0), which returns at once, and the main
-// loop would spin a whole CPU core.
+// pause under a millisecond is Sleep(0), which returns at once (the main
+// loop's old SleepMicro(1) would have spun a whole CPU core with it).
 #ifdef _WIN32
 #define _CRT_SECURE_NO_WARNINGS
 // keeps winsock.h out of windows.h; enet.h (below) brings winsock2.h

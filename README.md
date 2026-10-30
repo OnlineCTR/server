@@ -94,7 +94,7 @@ The server's own settings - connections per address, the lobby and race clocks, 
 
 From build 1115 every join is signed: the official launcher signs each join with the release's
 private key, and the server checks it with the release's public key (`OCTR_CLIENT_PUBKEY` in
-`SV_config.h`, new with every `SERVER_VERSION`). A join without a good signature is refused -
+`SV_config.h`, new with a `SERVER_VERSION` as a rule; 1121 kept 1119's). A join without a good signature is refused -
 the room list goes back, as for a wrong version - and an address refused three times in a
 minute is barred for ten minutes, as is a connection that keeps sending messages no client of
 this release can (`SV_auth.c`). Nothing is configured for this: the key is in the source.
@@ -267,7 +267,7 @@ client and server check each other on, and steps only when a release changes the
 message struct or type in `global.h`, what the server does in reply to one, or the seats in a room
 (`MAX_NUM_PLAYERS`, though no message changes size). A release that leaves `SERVER_VERSION` alone
 needs no server update; every server already running keeps accepting the new client. Both show in
-the server's console banner, as `Build 1119, Server 1119` for this release.
+the server's console banner, as `Build 1121, Server 1121` for this release.
 
 `SV_main.c` and `global.h` always come from the same release: `SV_main.c` names the protocol it
 was written for (`SV_PROTOCOL`), and a `global.h` from another release refuses to build with it.

@@ -39,21 +39,24 @@
 // The protocol this file was written for: global.h refuses to build with
 // another release's (SERVER_VERSION), which would have this relay messages
 // of a size and meaning it does not know.
-#define SV_PROTOCOL 1119   // (1117 until 1119: Matt, 29 Oct - every player and server on the same game)
+#define SV_PROTOCOL 1121   // (1119 until 1121: Matt, 31 Oct - WEAPON TUNING and the warp orb's go-ahead)
 #include "global.h"
 
 // The header has to be the one these sources were written against. A stale
 // copy - an earlier release's global.h left next to the sources - would fail
 // a page further down with undeclared message types and incomplete structs;
 // this says what actually went wrong. NET_WEAPON_EVENTS is the newest
-// thing this file needs from the header (10: a squish claimed too, and
+// thing this file needs from the header (11: one warp orb on the track at a
+// time in a BALANCED room, the server's go-ahead first - NET_ORB_ASK, GO, NO
+// and CANCEL on NET_EV_PROJ_END, Matt 30 Oct 2026: an older header has none
+// of these names, Orb_*; 10: a squish claimed too, and
 // Saffi's own flame colour, FLAME_SAFFI, 1110; 9: a shield's bump claimed
 // too, NET_CLAIM_HIT, 1109; 8: a masked kart's bump claimed,
 // NET_EV_KART_CLAIM, 1107; 5: the game modes' events,
 // NET_EV_LAP / NET_EV_OUT / NET_EV_IT, and SG_STARTLOADING's round code;
 // 4: 4-bit IDs, 12-bit identity, the rooms' closed mask; 3: the weapons'
 // arbitration, Tiger Temple's door, the item-less rooms' ghost bombs).
-#if !defined(NET_WEAPON_EVENTS) || (NET_WEAPON_EVENTS < 10)
+#if !defined(NET_WEAPON_EVENTS) || (NET_WEAPON_EVENTS < 11)
 #error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 // The game modes' rounds (Round_*: the ROUND_* causes and codes, TAG_*,
@@ -68,8 +71,13 @@
 // The lobby's OPTIONS (CG_HOSTACTION, DISCONNECT_REASON_KICKED) and the
 // players' vote (SG_VOTE, CG_VOTE): 1101; 2, the room's VOTE TO KICK in the
 // host's KICK PLAYER's place (HOST_ACTION_KICKVOTE / KICKUNVOTE,
-// KICK_VOTES_BY_PLAYERS, SG_VOTE's VOTE_KICK_REPLY): 1110.
-#if !defined(NET_HOST_ACTIONS) || (NET_HOST_ACTIONS < 2) || !defined(NET_VOTING) || (NET_VOTING < 1)
+// KICK_VOTES_BY_PLAYERS, SG_VOTE's VOTE_KICK_REPLY): 1110. NET_VOTING 2,
+// WEAPON TUNING after the laps (Matt, 30 Oct 2026: VOTE_TUNING and its
+// rows, SG_MessageVote's phaseHi and lap, SG/CG_MessageTrack's tuning,
+// ROOM_ROLLS_ITEMS): an older header has none of these names, and its
+// SG_VOTE would cut VOTE_TUNING (4) to the two bits of phase - VOTE_NONE,
+// with no warning.
+#if !defined(NET_HOST_ACTIONS) || (NET_HOST_ACTIONS < 2) || !defined(NET_VOTING) || (NET_VOTING < 2)
 #error "global.h is older than SV_main.c: replace it with the global.h from this release's zip (see README)"
 #endif
 #if !defined(MAX_NUM_PLAYERS) || (MAX_NUM_PLAYERS != 12)
@@ -242,6 +250,15 @@ typedef struct
 	// sent the track and laps on the way in. Was the padding byte.
 	unsigned char lapPlayed;
 
+	// ...and the race's WEAPON TUNING (Matt, 30 Oct 2026), TUNING_*: the
+	// vote's or the host's (Room_TrackIn), TUNING_BALANCED in a room without
+	// it (Room_NoTuningPick). It goes out with the track in SG_TRACK's tuning
+	// (Track_Fill) - to late joiners and spectators too, whose ROMs roll the
+	// race's odds from it - and back to BALANCED when the track is taken back
+	// (CG_TRACKCANCEL) and after the race (ResetRoomAfterRace). 0 BALANCED,
+	// so the room's memset leaves today's odds.
+	unsigned char tuningPlayed;
+
 	// "the track is in": set by CG_TRACK, cleared by CG_TRACKCANCEL and the
 	// post-race reset. NOT whether the room can be joined - that is
 	// RoomOpenForJoin(), which stays open through the picks.
@@ -272,14 +289,18 @@ typedef struct
 	// refresh.
 	char boolRaceShown;
 
-	// The players' vote for the track, then the laps (Vote_*): the vote
-	// running (VOTE_*), whether the room votes at all - the host's PLAYER
-	// VOTING, off is set, so the room's memset leaves a new room voting -
-	// the track the track vote put in, for the lap vote, and when the vote
+	// The players' vote for the track, then the laps, then WEAPON TUNING
+	// (Vote_*): the vote running (VOTE_*), whether the room votes at all -
+	// the host's PLAYER VOTING, off is set, so the room's memset leaves a new
+	// room voting - the track the track vote put in, for the lap and tuning
+	// votes, the lap row the lap vote put in, for the tuning vote (0 where
+	// there is no lap vote, ELIMINATION's row 0; both in SG_VOTE, so the
+	// tuning vote's screen shows the track and its laps), and when the vote
 	// running ends at the latest (enet_time_get() ms).
 	char votePhase;
 	char votingOff;
 	unsigned char voteTrack;
+	unsigned char voteLap;
 	char trackVoted;   // the track in now came from the vote (Vote_Finish), not the host (SG_TRACK's voted)
 	enet_uint32 voteDeadline;
 
@@ -381,12 +402,30 @@ typedef struct
 		enet_uint32 until;        // judged then, with nothing earlier in
 	} weaponHolds[8];
 
+	// The room's one warp orb (Matt, 30 Oct 2026; Orb_*): in a BALANCED
+	// race in a room that rolls items, the orb a go-ahead was sent for and
+	// whose shot is not in yet (ORB_GRANTED), or the orb shot and on the
+	// track until its end is relayed (ORB_LIVE); ORB_NONE, the memset's,
+	// none. Its owner and shot count - its identity, as weaponFate's - and
+	// until when (enet_time_get() ms) the go-ahead is the owner's to use, or
+	// the orb is taken as still out with no end heard. Cleared with
+	// weaponFate (Orb_Clear). Server-only.
+	unsigned char orbState;
+	unsigned char orbOwner;
+	unsigned char orbSerial;
+	enet_uint32 orbUntil;
+
 } RoomInfo;
 
 #define WEAPON_UNKNOWN 0
 #define WEAPON_LIVE    1
 #define WEAPON_ENDED   2
 #define WEAPON_HELD    3
+
+// RoomInfo.orbState (Orb_*)
+#define ORB_NONE    0
+#define ORB_GRANTED 1
+#define ORB_LIVE    2
 
 ENetHost* server;
 
@@ -428,6 +467,7 @@ static int tagFirst = -1;                        // --tagfirst: TAG's first "it"
 static int kickVoteLog = 0;                      // --kicklog: every vote to kick in the log, voter and all - for testing only (KickVote_*)
 static int spectateEnabled = SPECTATE_ENABLED;   // --nospectate: 0, no race in progress can be watched (RoomOpenForSpectate)
 static int watchLog = 0;                         // --watchlog: every camera's report in the log, who watches whom - for testing only (Watch_Set, 1111)
+static int orbLog = 0;                           // --orblog: the warp orb's referee in the log, every ask, answer, shot and end - for testing only (Orb_*, BALANCED rooms)
 
 static void KickBan_Add(enet_uint32 ip, int room)
 {
@@ -1377,9 +1417,10 @@ static int RoomList_Changed(RoomInfo* ri)
 	return 1;
 }
 
-// The host's clock runs for the track and lap pick, and the whole room is
-// told where it stands: the guests sit on "waiting for the host" and get to
-// see how long that can last. Only while the room is still open (no track
+// The host's clock runs for the track and lap pick (and WEAPON TUNING's,
+// the last before CG_TRACK, in the rooms that have it), and the whole room
+// is told where it stands: the guests sit on "waiting for the host" and get
+// to see how long that can last. Only while the room is still open (no track
 // yet); after CG_TRACK everybody is on their own clock instead.
 static void ArmHostIdle(RoomInfo* ri)
 {
@@ -1434,9 +1475,41 @@ static int Room_NoLapPick(RoomInfo* ri)
 	return row == ROOM_ROW_ELIMINATION || row == ROOM_ROW_TAG;
 }
 
-// The track and laps are in: the room goes on to the character pick. The
-// host's pick (CG_TRACK) or the players' vote (Vote_Finish).
-static void Room_TrackIn(RoomInfo* ri, int trackID, int lapID, int voted)
+// WEAPON TUNING (Matt, 30 Oct 2026: ORIGINAL, the retail game's odds, or
+// BALANCED, OnlineCTR's) only where the ? box rolls its item: CLASSIC,
+// ELIMINATION and CLASSIC USF (global.h's ROOM_ROLLS_ITEMS, which the ROM
+// reads too). The NO ITEMS rooms roll nothing, and POTION GAME, BOMBARDMENT
+// and TAG give their one weapon whatever the odds say (ROOM_FORCED_ITEM):
+// there the room's vote skips the tuning vote (Vote_Finish), the ROM's
+// tuning page locks itself on BALANCED (lobbyBusy.c), and the host's pick
+// goes in as TUNING_BALANCED whatever it said (CG_TRACK).
+static int Room_NoTuningPick(RoomInfo* ri)
+{
+	return !ROOM_ROLLS_ITEMS((int)(ri - roomInfos));
+}
+
+// The SG_TRACK of the track in, for everything that sends it: the room's
+// (Room_TrackIn), a late joiner's (CG_JOINROOM), a spectator's (Spectator_
+// Join) and a player's welcomed after the reset (Spectator_Welcome) - the
+// track, its lap row, whether the room voted it in (which the client's
+// TRIANGLE goes by) and the race's WEAPON TUNING (NET_VOTING 2), from the
+// room as Room_TrackIn left it. All in one place so none of the four can
+// miss a field again: each used to clear the padding by hand.
+static void Track_Fill(RoomInfo* ri, struct SG_MessageTrack* st)
+{
+	memset(st, 0, sizeof(*st));
+	st->type = SG_TRACK;
+	st->voted = ri->trackVoted;
+	st->tuning = ri->tuningPlayed;
+	st->trackID = ri->levelPlayed;
+	st->lapID = ri->lapPlayed;
+}
+
+// The track, laps and WEAPON TUNING are in: the room goes on to the
+// character pick. The host's pick (CG_TRACK) or the players' vote
+// (Vote_Finish). tuning is TUNING_*, the callers' TUNING_BALANCED in a room
+// without it.
+static void Room_TrackIn(RoomInfo* ri, int trackID, int lapID, int voted, int tuning)
 {
 	struct SG_MessageTrack s;
 
@@ -1447,20 +1520,24 @@ static void Room_TrackIn(RoomInfo* ri, int trackID, int lapID, int voted)
 	ri->trackVoted = voted ? 1 : 0;
 	ri->lapPlayed = (unsigned char)lapID;
 	ri->levelPlayed = (unsigned char)trackID;
+	ri->tuningPlayed = (unsigned char)(tuning == TUNING_ORIGINAL ? TUNING_ORIGINAL : TUNING_BALANCED);
 
-	s.type = SG_TRACK;
-	s.voted = ri->trackVoted;
-	s.padding = 0;
-	s.trackID = trackID;
-	s.lapID = lapID;
+	Track_Fill(ri, &s);
 
-	PrintPrefix((int)(ri - roomInfos) + 1);
-	if (Room_NoLapPick(ri))
-		printf("Track #%d was selected (the laps are set as the race loads)\n", trackID);
-	else
+	// (WEAPON TUNING named only in the rooms that have it: the others' is
+	// always BALANCED, and says nothing)
 	{
-		static const int lapsByID[8] = { LAP_COUNT_BY_ID };
-		printf("Track #%d and %d laps were selected\n", trackID, lapsByID[lapID & 7]);
+		const char* tuningNote = Room_NoTuningPick(ri) ? "" :
+			(ri->tuningPlayed == TUNING_ORIGINAL ? ", weapon tuning ORIGINAL" : ", weapon tuning BALANCED");
+
+		PrintPrefix((int)(ri - roomInfos) + 1);
+		if (Room_NoLapPick(ri))
+			printf("Track #%d was selected (the laps are set as the race loads)%s\n", trackID, tuningNote);
+		else
+		{
+			static const int lapsByID[8] = { LAP_COUNT_BY_ID };
+			printf("Track #%d and %d laps were selected%s\n", trackID, lapsByID[lapID & 7], tuningNote);
+		}
 	}
 
 	broadcastToPeersReliable(ri, &s, sizeof(struct SG_MessageTrack));
@@ -1481,11 +1558,15 @@ static void Room_TrackIn(RoomInfo* ri, int trackID, int lapID, int voted)
 // ---------------------------------------------------------------- the vote
 //
 // Unless the host has turned PLAYER VOTING off (CG_HOSTACTION), the room's
-// players vote the track and then the laps, in place of the host's pick: a
-// vote opens with each lobby round (the first player in, the room back
-// from a race) and closes when every player has voted or voteSeconds are
-// up (Vote_Tick). The most votes win; a tie, or no vote at all, is drawn
-// at random among the options level with the most. Players can change
+// players vote the track, then the laps, then WEAPON TUNING (Matt, 30 Oct
+// 2026: ORIGINAL or BALANCED, in the rooms whose ? box rolls its item -
+// Room_NoTuningPick; ELIMINATION goes from the track straight to it, TAG
+// has the track vote alone), in place of the host's pick: a vote opens
+// with each lobby round (the first player in, the room back from a race),
+// each of the three runs on into the next (Vote_Finish), and each closes
+// when every player has voted or voteSeconds are up (Vote_Tick). The most
+// votes win; a tie, or no vote at all, is drawn at random among the
+// options level with the most. Players can change
 // their vote until it closes, and see everybody's as it stands (SG_VOTE).
 // Nobody's idle clock runs while the room votes - not voting is no reason
 // to be removed - and every player's starts with the character pick, as
@@ -1515,15 +1596,28 @@ static int Vote_Voter(PeerInfo* pi)
 	return pi->peer != 0 && pi->peer->state == ENET_PEER_STATE_CONNECTED && pi->spectator == 0;
 }
 
+// A vote's name in the log: the track, lap and WEAPON TUNING votes'.
+static const char* Vote_Name(int phase)
+{
+	return phase == VOTE_TRACK ? "Track" : phase == VOTE_LAPS ? "Lap" : "Weapon tuning";
+}
+
+// The phase goes out in two fields since NET_VOTING 2: VOTE_TUNING is 4,
+// past the two bits of phase (3 being SG_VOTE's VOTE_KICK_REPLY, never a
+// room's vote), so its third bit rides in phaseHi (SG_VOTE_PHASE puts them
+// back together). The voted track and, for the tuning vote, its voted lap
+// row go with it, for the tuning vote's screen (the track picture's caption).
 // (only the votes the tally counts: Vote_Finish)
 static void Vote_Fill(RoomInfo* ri, struct SG_MessageVote* sg)
 {
 	memset(sg, 0, sizeof(*sg));
 	sg->type = SG_VOTE;
-	sg->phase = ri->votePhase;
+	sg->phase = ri->votePhase & 3;
+	sg->phaseHi = (ri->votePhase >> 2) & 1;
 	sg->enabled = !ri->votingOff;
 	sg->seconds = (unsigned char)Vote_SecondsLeft(ri);
 	sg->track = ri->voteTrack;
+	sg->lap = ri->voteLap;
 	for (int i = 0; i < MAX_CLIENTS; i++)
 		if (Vote_Voter(&ri->peerInfos[i]))
 			sg->votes[i] = ri->peerInfos[i].vote;
@@ -1565,17 +1659,22 @@ static void Vote_Start(RoomInfo* ri, int phase)
 		IdlePause(&ri->peerInfos[ri->hostID]);
 
 	PrintPrefix((int)(ri - roomInfos) + 1);
-	printf("%s vote open for %ds\n", phase == VOTE_TRACK ? "Track" : "Lap", voteSeconds);
+	printf("%s vote open for %ds\n", Vote_Name(phase), voteSeconds);
 
 	Vote_Broadcast(ri);
 }
 
 
+// (the tally's counts hold the longest vote's options)
+STATIC_ASSERT2(VOTE_LAP_ROWS <= VOTE_TRACKS && VOTE_TUNING_ROWS <= VOTE_TRACKS, "Vote_Finish: counts[] holds VOTE_TRACKS options");
+
 // The vote closed: the option with the most votes, a tie drawn at random.
+// WEAPON TUNING's the same as the others' (Matt's rule, 30 Oct 2026): a
+// 1-1 split, or nobody voting, is ORIGINAL or BALANCED half the time each.
 static void Vote_Finish(RoomInfo* ri)
 {
 	int counts[VOTE_TRACKS];
-	int options = ri->votePhase == VOTE_TRACK ? VOTE_TRACKS : VOTE_LAP_ROWS;
+	int options = VOTE_OPTIONS(ri->votePhase);
 	int best = 0, tied = 0, pick, i;
 
 	memset(counts, 0, sizeof(counts));
@@ -1602,29 +1701,52 @@ static void Vote_Finish(RoomInfo* ri)
 
 	PrintPrefix((int)(ri - roomInfos) + 1);
 	printf("%s vote closed (option %d with %d vote%s%s)\n",
-		ri->votePhase == VOTE_TRACK ? "Track" : "Lap", pick, best, best == 1 ? "" : "s",
+		Vote_Name(ri->votePhase), pick, best, best == 1 ? "" : "s",
 		tied > 1 ? " (drawn from a tie)" : "");
 
-	if (ri->votePhase == VOTE_TRACK && Room_NoLapPick(ri))
+	// Each vote runs on into the next the room has - TRACK, LAPS, WEAPON
+	// TUNING - and the last one's close puts the track in. ELIMINATION and
+	// TAG have no lap vote (Room_NoLapPick: the laps are fixed as the race
+	// loads, lap row 0 till then); the rooms whose ? box gives one weapon,
+	// or none, no tuning vote (Room_NoTuningPick: BALANCED). So CLASSIC and
+	// CLASSIC USF vote all three, ELIMINATION the track and the tuning, TAG
+	// the track alone, and the others the track and the laps. Vote_Start
+	// clears every vote cast, so the next vote never closes on this one's.
+	// Wherever the track goes in, the phase is cleared FIRST: left on the
+	// vote just closed, the next tick's Vote_Tick would see everybody voted
+	// and close it again - a fresh Room_TrackIn every tick, a tie drawn anew
+	// each time.
+	if (ri->votePhase == VOTE_TRACK)
 	{
-		// No lap vote in ELIMINATION and TAG (Room_NoLapPick): the track goes
-		// straight in, on lap row 0. The phase is cleared first, as the lap
-		// vote's close does below: left on VOTE_TRACK, the next tick's
-		// Vote_Tick would see everybody voted and close this vote again -
-		// a fresh Room_TrackIn every tick, a tie drawn anew each time.
 		ri->voteTrack = (unsigned char)pick;
-		ri->votePhase = VOTE_NONE;
-		Room_TrackIn(ri, pick, 0, 1);
+		ri->voteLap = 0;
+		if (!Room_NoLapPick(ri))
+			Vote_Start(ri, VOTE_LAPS);
+		else if (!Room_NoTuningPick(ri))
+			Vote_Start(ri, VOTE_TUNING);   // ELIMINATION
+		else
+		{
+			ri->votePhase = VOTE_NONE;     // TAG
+			Room_TrackIn(ri, pick, 0, 1, TUNING_BALANCED);
+		}
 	}
-	else if (ri->votePhase == VOTE_TRACK)
+	else if (ri->votePhase == VOTE_LAPS)
 	{
-		ri->voteTrack = (unsigned char)pick;
-		Vote_Start(ri, VOTE_LAPS);
+		ri->voteLap = (unsigned char)pick;
+		if (!Room_NoTuningPick(ri))
+			Vote_Start(ri, VOTE_TUNING);   // CLASSIC, CLASSIC USF
+		else
+		{
+			ri->votePhase = VOTE_NONE;     // NO ITEMS, POTION GAME, BOMBARDMENT, NO ITEMS USF
+			Room_TrackIn(ri, ri->voteTrack, pick, 1, TUNING_BALANCED);
+		}
 	}
 	else
 	{
+		// VOTE_TUNING: the row's tuning (TUNING_FROM_ROW: ORIGINAL listed
+		// first, as Matt named them)
 		ri->votePhase = VOTE_NONE;
-		Room_TrackIn(ri, ri->voteTrack, pick, 1);
+		Room_TrackIn(ri, ri->voteTrack, ri->voteLap, 1, TUNING_FROM_ROW(pick));
 	}
 }
 
@@ -1659,13 +1781,15 @@ static void Vote_Tick(RoomInfo* ri)
 // the moment between them had it. Alone: every running clock pauses,
 // keeping what is left, a vote's time with them, and the room is told there
 // is no clock (0: the client hides TIME LEFT). Two or more: the clocks the
-// room's stage runs, running - the vote's on from what it had, the host's
-// for the track and lap pick, every unlocked player's on the character pick
-// (the locked-in players' number follows: RoomWatchUpdate). Each only if it
-// is not as it should be, so the room is told only what changes; only
-// connected players' clocks (Vote_Voter: not one on its way out, a kick or
-// an idle removal). Not while the race loads or runs: no clock runs then,
-// and the reset after it (the vote, the host's clock) asks Room_Solo itself.
+// room's stage runs, running - the vote's on from what it had (each of the
+// three votes: Vote_Begin holds every one's again while alone), the host's
+// for the track, lap and tuning pick, every unlocked player's on the
+// character pick (the locked-in players' number follows: RoomWatchUpdate).
+// Each only if it is not as it should be, so the room is told only what
+// changes; only connected players' clocks (Vote_Voter: not one on its way
+// out, a kick or an idle removal). Not while the race loads or runs: no
+// clock runs then, and the reset after it (the vote, the host's clock) asks
+// Room_Solo itself.
 static void Solo_Tick(RoomInfo* ri)
 {
 	int solo, changed = 0;
@@ -1829,7 +1953,7 @@ static void KickVote_Kick(RoomInfo* ri, int t, int votes, int need, int players)
 
 	pi->idleStart = 0;
 	pi->boolLoadSelf = 0;
-	pi->vote = 0;   // and their vote out of the room's track or lap vote, at once
+	pi->vote = 0;   // and their vote out of the room's track, lap or tuning vote, at once
 	KickVote_Forget(ri, t);
 	KickBan_Add(pi->peer->address.host, (int)(ri - roomInfos));
 
@@ -2495,6 +2619,10 @@ static void Round_Tick(RoomInfo* ri)
 	printf("Round live at the green: %d players in\n", in);
 }
 
+// (the room's one warp orb when its owner leaves: with the weapons below,
+// Orb_*)
+static void Orb_Leave(RoomInfo* ri, int id);
+
 void ProcessDisconnectEvent(ENetPeer* peer)
 {
 	//identify which client ID this came from
@@ -2632,6 +2760,14 @@ void ProcessDisconnectEvent(ENetPeer* peer)
 		// a round's end here (Round_Check) does not mark their race ended:
 		// the empty SG_NAME below still goes out for them.
 		Round_Leave(ri, peerID);
+
+		// The room's warp orb, theirs (Orb_*, Matt 30 Oct 2026): a go-ahead
+		// they can no longer use is called off at once, the others told
+		// (their seat is empty already); an orb out stays out a while yet -
+		// its copies fly on and can still hit - ORB_LEFT_MS at most. Above
+		// the silent leave's early return below as well: a finisher's kart,
+		// driven on by the bot, can have fired it.
+		Orb_Leave(ri, peerID);
 
 		// if this client ended race, dont tell
 		// anyone that the client disconnected - but the room list is
@@ -2989,6 +3125,373 @@ static void KartClaim_Relay(RoomInfo* ri, ENetPeer* peer, int peerID, const stru
 	sendToPeerReliable(vp, &s, sizeof(s));
 }
 
+// ------------------------------------ one warp orb on the track (BALANCED)
+//
+// Matt (30 Oct 2026): "In balanced mode, change it so that if a warp orb has
+// been deployed, stop all players from getting the warp orb weapon from a ?
+// box until the existing warp orb on the track has gone. Server lag may
+// affect this so if a player attempts to deploy a warp orb, have the server
+// first send the 'go ahead' signal (basically the server will track the warp
+// orbs around the track)." In a room that rolls items (ROOM_ROLLS_ITEMS)
+// racing BALANCED (tuningPlayed), the ROM holds a pressed orb in its kart's
+// hand and asks first: NET_EV_PROJ_END with arg NET_ORB_ASK, on the identity
+// the orb's shot will have (global.h's NET_ORB_*). The first ask with no orb
+// out is granted - NET_ORB_GO to the whole room: the asker's go-ahead (its
+// client lets it through as the answer to its tentative ask), and everybody
+// else's "an orb is out", which keeps the orb out of their ? boxes
+// (lastPlace.c). Every other ask while that orb stands is refused, to the
+// asker alone (NET_ORB_NO: Matt's answer - the refused orb becomes a mask).
+// Two players pressing within each other's lag both ask, and only the first
+// in here is granted: that is the point of asking, as a ROM that fired on its
+// own screen could not be told so after. A player out of the round
+// (ELIMINATION's ghosts) is refused too.
+//
+// The orb is out from its shot (CG_WEAPON, weapon 9; Orb_Shot) to its first
+// end relayed (PROJ_END 0-3 or DESTROYED, as for any weapon: its fate no
+// longer live, Orb_Tick). A shot from anybody else while one is out is not
+// relayed and its fate is not set: only its shooter sees it, and its end is
+// dropped as any end of a weapon the server never had live. A shot nobody
+// asked for with none out - a finished player's kart driven on by the bot,
+// a late shot after its go-ahead ran out - is taken as the room's orb: the
+// relayed shot tells everybody. The server calls off a go-ahead not used in
+// its time (the asker's round trip and ORB_GRANT_MARGIN_MS, ORB_GRANT_MAX_MS
+// at most), an orb whose end is never heard (ORB_LIVE_MAX_MS: its shot
+// refused on its own machine, NetShot_Room; its copies gone quietly after
+// its owner left) and a go-ahead whose owner leaves - NET_ORB_CANCEL to the
+// room, clientID the owner, which drops the orb and ends any copy of it
+// quietly. Its owner's own client drops that as its echo: its ROM times its
+// go-ahead and its orb out on its own. An owner leaving with the orb out
+// leaves it out ORB_LEFT_MS more at most (Orb_Leave): its copies fly on and
+// can still hit.
+//
+// Spectators send nothing of a race (SPECTATOR_DROPS). The words to the room
+// go as the referee's verdicts do (Round_Send, as NET_EV_OUT: every racer,
+// and a spectator once it watches - it holds copies of the orb as the racers
+// do, and one called off ends there too; it rolls nothing, so the rest is
+// nothing to it). A race played ORIGINAL (the retail rule, an own orb out
+// gives three missiles) or in a room that rolls nothing is not refereed: an
+// ask there - none should come, the ROM asks only in a refereed race - is
+// granted to the asker alone and nothing is kept, so no ROM is left waiting.
+//
+// Logged always: a shot not relayed, a go-ahead never used, an orb with no
+// end heard. The grants, refusals, shots and ends with --orblog only, for the
+// tests: two karts trading orbs all race would fill a host's log.
+// (ORB_GRANT_MARGIN_MS, ORB_GRANT_MAX_MS, ORB_LIVE_MAX_MS, ORB_LEFT_MS:
+// SV_config.h)
+
+static int Orb_Refereed(RoomInfo* ri)
+{
+	return ri->boolRaceAll && ROOM_ROLLS_ITEMS((int)(ri - roomInfos)) && ri->tuningPlayed == TUNING_BALANCED;
+}
+
+// A log line's start: the room, then "Warp orb: " - or "Warp orb
+// (--orblog): " for the lines only that flag asks for, as --kicklog's.
+static void Orb_Say(RoomInfo* ri, int verbose)
+{
+	PrintPrefix((int)(ri - roomInfos) + 1);
+	printf("Warp orb%s: ", verbose ? " (--orblog)" : "");
+}
+
+// The room's orb gone: nothing kept. tell: called off by the server, so
+// the room is told (NET_ORB_CANCEL, clientID and owner the orb's owner,
+// its count) - not for a clear the clients make themselves (the race's load,
+// the reset) or an end they had relayed to them (Orb_Tick).
+static void Orb_Clear(RoomInfo* ri, int tell)
+{
+	if (tell && ri->orbState != ORB_NONE)
+		Round_Send(ri, NET_EV_PROJ_END, ri->orbOwner, ri->orbOwner, ri->orbSerial, NET_ORB_CANCEL);
+	ri->orbState = ORB_NONE;
+	ri->orbOwner = 0;
+	ri->orbSerial = 0;
+	ri->orbUntil = 0;
+}
+
+// The room's orb ended (its first end relayed, by the handler that relays
+// any weapon's: its fate no longer live) - the track free. Each tick
+// (Orb_Tick), and before an ask or an orb shot is judged: one later in the
+// same batch of messages than that end finds the track free, as the room
+// it was relayed to does.
+static void Orb_Settle(RoomInfo* ri)
+{
+	PeerInfo* pi = &ri->peerInfos[ri->orbOwner];
+
+	if (ri->orbState != ORB_LIVE || ri->weaponFate[(ri->orbOwner << 8) | ri->orbSerial] == WEAPON_LIVE)
+		return;
+	if (orbLog)
+	{
+		Orb_Say(ri, 1);
+		printf("%.*s (%d)'s orb (shot #%d) ended: the track is free\n", NAME_LEN, &pi->name[0], ri->orbOwner, ri->orbSerial);
+	}
+	Orb_Clear(ri, 0);
+}
+
+// A ROM's word on its own orb (CG_WEAPONEVENT, NET_EV_PROJ_END with arg
+// NET_ORB_ASK or more): taken before anything looks at the identity's fate -
+// an ask names a shot not fired yet. Only the ROM's two words come from a
+// client, on the sender's own orb: the answers are the server's to give, an
+// argument past them is one the protocol has not got, and an ask or cancel
+// on another player's orb would grant or call off theirs - all Suspect, as
+// every other event no client of this release sends.
+static void Orb_Event(RoomInfo* ri, ENetPeer* peer, int peerID, const struct CG_MessageWeaponEvent* r)
+{
+	PeerInfo* pi = &ri->peerInfos[peerID];
+	int serial = r->serial;
+
+	if (r->arg == NET_ORB_GO || r->arg == NET_ORB_NO)
+	{
+		if (Suspect(peer, "a warp orb's answer only the server sends")) enet_peer_disconnect(peer, 0);
+		return;
+	}
+	if (r->arg != NET_ORB_ASK && r->arg != NET_ORB_CANCEL)
+	{
+		if (Suspect(peer, "a weapon event the protocol has not got")) enet_peer_disconnect(peer, 0);
+		return;
+	}
+	if (r->owner != peerID)
+	{
+		if (Suspect(peer, "a warp orb asked for or called off for another player")) enet_peer_disconnect(peer, 0);
+		return;
+	}
+
+	// (a connection on its way out - disconnected for something it sent
+	// before: a go-ahead would only be called off at its leave)
+	if (peer->state != ENET_PEER_STATE_CONNECTED)
+		return;
+
+	if (r->arg == NET_ORB_ASK)
+	{
+		// not refereed here: the go-ahead, to the asker alone, and nothing
+		// kept (Orb_Refereed; see above)
+		if (!Orb_Refereed(ri))
+		{
+			Round_SendTo(peer, NET_EV_PROJ_END, peerID, peerID, serial, NET_ORB_GO);
+			if (orbLog)
+			{
+				Orb_Say(ri, 1);
+				printf("%.*s (%d) asked for shot #%d in a race not refereed: the go-ahead, nothing kept\n",
+					NAME_LEN, &pi->name[0], peerID, serial);
+			}
+			return;
+		}
+
+		// out of the round (an ELIMINATION ghost): no orb of theirs counts
+		if (!Round_IsIn(ri, peerID))
+		{
+			Round_SendTo(peer, NET_EV_PROJ_END, peerID, peerID, serial, NET_ORB_NO);
+			if (orbLog)
+			{
+				Orb_Say(ri, 1);
+				printf("%.*s (%d) asked for shot #%d out of the round: refused\n",
+					NAME_LEN, &pi->name[0], peerID, serial);
+			}
+			return;
+		}
+
+		// an orb whose end came earlier in this batch: gone already
+		Orb_Settle(ri);
+
+		// none out: theirs, for their round trip and the margin - the GO
+		// reaches them half a round trip from now, their ROM takes it up to
+		// 5 s after its ask and fires within a second of it once the kart
+		// can, and the shot is half a round trip on its way back
+		if (ri->orbState == ORB_NONE)
+		{
+			enet_uint32 w = peer->roundTripTime + ORB_GRANT_MARGIN_MS;
+			if (w > ORB_GRANT_MAX_MS) w = ORB_GRANT_MAX_MS;
+			ri->orbState = ORB_GRANTED;
+			ri->orbOwner = (unsigned char)peerID;
+			ri->orbSerial = (unsigned char)serial;
+			ri->orbUntil = enet_time_get() + w;
+			Round_Send(ri, NET_EV_PROJ_END, peerID, peerID, serial, NET_ORB_GO);
+			if (orbLog)
+			{
+				Orb_Say(ri, 1);
+				printf("%.*s (%d) asked for shot #%d: granted, %u ms to fire it\n",
+					NAME_LEN, &pi->name[0], peerID, serial, (unsigned)w);
+			}
+			return;
+		}
+
+		// the same orb asked for again (its ROM gave up waiting on the GO
+		// and asked anew): the go-ahead again, to the asker alone, its time
+		// as it was
+		if (ri->orbOwner == peerID && ri->orbSerial == serial)
+		{
+			Round_SendTo(peer, NET_EV_PROJ_END, peerID, peerID, serial, NET_ORB_GO);
+			if (orbLog)
+			{
+				Orb_Say(ri, 1);
+				printf("%.*s (%d) asked for shot #%d again: the go-ahead again\n",
+					NAME_LEN, &pi->name[0], peerID, serial);
+			}
+			return;
+		}
+
+		// another orb out, or asked for first: no (the asker's orb becomes
+		// a mask)
+		Round_SendTo(peer, NET_EV_PROJ_END, peerID, peerID, serial, NET_ORB_NO);
+		if (orbLog)
+		{
+			Orb_Say(ri, 1);
+			printf("%.*s (%d) asked for shot #%d: refused, %.*s (%d)'s orb is %s\n",
+				NAME_LEN, &pi->name[0], peerID, serial,
+				NAME_LEN, &ri->peerInfos[ri->orbOwner].name[0], ri->orbOwner,
+				ri->orbState == ORB_GRANTED ? "granted" : "out");
+		}
+		return;
+	}
+
+	// NET_ORB_CANCEL: a go-ahead its ROM could not use (the orb lost - a
+	// rain cloud, the finish, out of the round - or its fire window over),
+	// on the identity granted. One the server has already called off or
+	// ended, or never gave, is nothing now: the two cross on the way.
+	if (ri->orbState == ORB_NONE || ri->orbOwner != peerID || ri->orbSerial != serial)
+	{
+		if (orbLog)
+		{
+			Orb_Say(ri, 1);
+			printf("%.*s (%d) called off shot #%d, not the room's orb: nothing to do\n",
+				NAME_LEN, &pi->name[0], peerID, serial);
+		}
+		return;
+	}
+	if (ri->orbState == ORB_GRANTED)
+	{
+		if (orbLog)
+		{
+			Orb_Say(ri, 1);
+			printf("%.*s (%d) called off the go-ahead for shot #%d\n", NAME_LEN, &pi->name[0], peerID, serial);
+		}
+		Orb_Clear(ri, 1);
+		return;
+	}
+
+	// ...on the orb already shot: its end, as any final word on it - the
+	// first one relayed (the room drops it and ends its copies quietly), and
+	// its fate ended so any later end is dropped
+	{
+		unsigned char* fate = &ri->weaponFate[(peerID << 8) | serial];
+		int live = (*fate == WEAPON_LIVE);
+		if (live) *fate = WEAPON_ENDED;
+		if (orbLog)
+		{
+			Orb_Say(ri, 1);
+			printf("%.*s (%d) called off shot #%d, already out: %s\n", NAME_LEN, &pi->name[0], peerID, serial,
+				live ? "ended, the room told" : "its end was in already");
+		}
+		Orb_Clear(ri, live);
+	}
+}
+
+// A warp orb shot (CG_WEAPON, weapon 9), before its fate is set: 1 when it
+// goes on to be relayed, 0 when it is dropped - another orb is out, or
+// granted to somebody else (only its shooter has it, and its end is dropped
+// by the fate check). The orb granted to it, or one nobody asked for with
+// none out, is the room's orb from here (ORB_LIVE), for ORB_LIVE_MAX_MS at
+// most without its end heard.
+static int Orb_Shot(RoomInfo* ri, int peerID, int serial)
+{
+	PeerInfo* pi = &ri->peerInfos[peerID];
+
+	if (!Orb_Refereed(ri))
+		return 1;
+
+	Orb_Settle(ri);
+	if (ri->orbState != ORB_NONE && !(ri->orbOwner == peerID && ri->orbSerial == serial))
+	{
+		Orb_Say(ri, 0);
+		printf("%.*s (%d) fired shot #%d with %.*s (%d)'s orb %s: not relayed\n",
+			NAME_LEN, &pi->name[0], peerID, serial,
+			NAME_LEN, &ri->peerInfos[ri->orbOwner].name[0], ri->orbOwner,
+			ri->orbState == ORB_GRANTED ? "granted" : "out");
+		return 0;
+	}
+
+	// (the orb's own shot again - none comes, an orb is fired once: as it
+	// was, its clock unchanged)
+	if (ri->orbState == ORB_LIVE)
+		return 1;
+
+	if (orbLog)
+	{
+		Orb_Say(ri, 1);
+		printf("%.*s (%d) fired shot #%d%s: out\n", NAME_LEN, &pi->name[0], peerID, serial,
+			ri->orbState == ORB_GRANTED ? " on its go-ahead" : ", unasked with none out");
+	}
+	ri->orbState = ORB_LIVE;
+	ri->orbOwner = (unsigned char)peerID;
+	ri->orbSerial = (unsigned char)serial;
+	ri->orbUntil = enet_time_get() + ORB_LIVE_MAX_MS;
+	return 1;
+}
+
+// Each tick: the room's orb ended (its first end relayed: the fate no
+// longer live), or its time up - a go-ahead never used, an orb with no end
+// heard: called off, the room told; that orb's fate ended too, so a late
+// end of it is dropped (every copy has gone). A race over: cleared.
+static void Orb_Tick(RoomInfo* ri)
+{
+	int id = (ri->orbOwner << 8) | ri->orbSerial;
+	PeerInfo* pi = &ri->peerInfos[ri->orbOwner];
+
+	if (ri->orbState == ORB_NONE)
+		return;
+	if (!ri->boolRaceAll)
+	{
+		Orb_Clear(ri, 0);
+		return;
+	}
+	Orb_Settle(ri);
+	if (ri->orbState == ORB_NONE || (int)(enet_time_get() - ri->orbUntil) < 0)
+		return;
+
+	Orb_Say(ri, 0);
+	if (ri->orbState == ORB_GRANTED)
+		printf("%.*s (%d)'s go-ahead for shot #%d never used in its time: called off\n",
+			NAME_LEN, &pi->name[0], ri->orbOwner, ri->orbSerial);
+	else
+	{
+		printf("%.*s (%d)'s orb (shot #%d) with no end heard%s: called off\n",
+			NAME_LEN, &pi->name[0], ri->orbOwner, ri->orbSerial,
+			pi->peer == 0 ? " since its owner left" : " in its time");
+		ri->weaponFate[id] = WEAPON_ENDED;
+	}
+	Orb_Clear(ri, 1);
+}
+
+// Its owner gone (ProcessDisconnectEvent, their seat already empty): a
+// go-ahead called off at once, the others told; an orb out left out
+// ORB_LEFT_MS more at most - its copies fly on and can still hit, and its
+// end comes from the hit kart's machine or the target's as ever - then
+// called off by Orb_Tick.
+static void Orb_Leave(RoomInfo* ri, int id)
+{
+	enet_uint32 until;
+
+	if (ri->orbState == ORB_NONE || ri->orbOwner != id)
+		return;
+	if (ri->orbState == ORB_GRANTED)
+	{
+		if (orbLog)
+		{
+			Orb_Say(ri, 1);
+			printf("%.*s (%d) left with the go-ahead for shot #%d: called off\n",
+				NAME_LEN, &ri->peerInfos[id].name[0], id, ri->orbSerial);
+		}
+		Orb_Clear(ri, 1);
+		return;
+	}
+	until = enet_time_get() + ORB_LEFT_MS;
+	if ((int)(until - ri->orbUntil) < 0)
+		ri->orbUntil = until;
+	if (orbLog)
+	{
+		Orb_Say(ri, 1);
+		printf("%.*s (%d) left with its orb (shot #%d) out: out %d s more at most\n",
+			NAME_LEN, &ri->peerInfos[id].name[0], id, ri->orbSerial, ORB_LEFT_MS / 1000);
+	}
+}
+
 // --------------------------------------- a race in progress watched (1110)
 //
 // Matt: "If a match is in progress and it has room, add an option to ask the
@@ -3082,11 +3585,10 @@ static void Spectator_Join(RoomInfo* ri, ENetPeer* peer)
 
 	WelcomeNewClient(ri, id, NEWCLIENT_SPECTATOR);
 
-	st.type = SG_TRACK;
-	st.voted = ri->trackVoted;
-	st.padding = 0;
-	st.trackID = ri->levelPlayed;
-	st.lapID = ri->lapPlayed;
+	// (with the race's WEAPON TUNING: a spectator rolls nothing - the other
+	// karts' items come from their shots - but its octr says the same as the
+	// racers', Track_Fill)
+	Track_Fill(ri, &st);
 	sendToPeerReliable(peer, &st, sizeof(struct SG_MessageTrack));
 
 	RoomList_Dirty();   // someone chose a room: everybody's list, after the welcome above (RoomList_Flush)
@@ -3347,11 +3849,7 @@ static void Spectator_Welcome(RoomInfo* ri, int id)
 	if (ri->boolRoomLocked)
 	{
 		struct SG_MessageTrack st;
-		st.type = SG_TRACK;
-		st.voted = ri->trackVoted;
-		st.padding = 0;
-		st.trackID = ri->levelPlayed;
-		st.lapID = ri->lapPlayed;
+		Track_Fill(ri, &st);
 		sendToPeerReliable(peer, &st, sizeof(struct SG_MessageTrack));
 
 		ArmIdle(ri, id);
@@ -3672,12 +4170,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				ArmHostIdle(ri);
 			else if (ri->boolRoomLocked)
 			{
+				// (the race's WEAPON TUNING with it, so the late joiner's ROM
+				// rolls the odds the room's other machines roll: Track_Fill)
 				struct SG_MessageTrack st;
-				st.type = SG_TRACK;
-				st.voted = ri->trackVoted;
-				st.padding = 0;
-				st.trackID = ri->levelPlayed;
-				st.lapID = ri->lapPlayed;
+				Track_Fill(ri, &st);
 				sendToPeerReliable(peer, &st, sizeof(struct SG_MessageTrack));
 
 				ArmIdle(ri, id);
@@ -3841,6 +4337,7 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			{
 				int trackID = r->trackID;
 				int lapID = r->lapID;
+				int tuning = r->tuning;
 
 				// Every room races the race tracks only - the ROM's list and
 				// the vote offer nothing else (NUM_TRACKS, menu.c; VOTE_TRACKS)
@@ -3862,7 +4359,17 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				if (Room_NoLapPick(ri))
 					lapID = 0;
 
-				Room_TrackIn(ri, trackID, lapID, 0);
+				// WEAPON TUNING (NET_VOTING 2): the host's, picked after the
+				// laps (the client sends CG_TRACK at that lock, the last of
+				// the host's picks). A room without it (Room_NoTuningPick) races
+				// BALANCED whatever the message said - its ROM's tuning page
+				// locks itself on BALANCED, so only a modified client says
+				// otherwise, and like the lap row above that is no reason to
+				// refuse. One bit: nothing out of range.
+				if (Room_NoTuningPick(ri))
+					tuning = TUNING_BALANCED;
+
+				Room_TrackIn(ri, trackID, lapID, 0, tuning);
 			}
 			break;
 		}
@@ -3904,10 +4411,12 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 
 		case CG_TRACKCANCEL:
 		{
-			// The host stepping back from the character pick to the lap pick
-			// (TRIANGLE in the ROM). Host only, and only while the room is on
-			// the character pick: once everybody has locked in and
-			// SG_STARTLOADING is out, it is too late.
+			// The host stepping back from the character pick to their last
+			// pick (TRIANGLE in the ROM): WEAPON TUNING, or in a room without
+			// it LAP SELECT, or TAG's track list (Lobby_BackPick, tuning.c).
+			// Host only, and only while the room is on the character pick:
+			// once everybody has locked in and SG_STARTLOADING is out, it is
+			// too late.
 			// (A track the room voted in: everybody's, not the host's to take
 			// back, whatever PLAYER VOTING is now - turned the other way, it
 			// is the next round's; the ROM's TRIANGLE leaves the room instead.)
@@ -3917,6 +4426,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			ri->boolRoomLocked = 0;
 			ri->trackVoted = 0;
 			ri->levelPlayed = 0;
+			// (and the tuning back to BALANCED until the next track, as each
+			// client's octr->weaponTuning goes at SG_TRACKCANCEL; the next
+			// SG_TRACK carries the host's pick again)
+			ri->tuningPlayed = TUNING_BALANCED;
 
 			for (int i = 0; i < MAX_CLIENTS; i++)
 			{
@@ -3929,7 +4442,8 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			}
 
 			PrintPrefix((int)(ri - roomInfos) + 1);
-			printf("Host cancelled the track and the room is back to the lap pick\n");
+			printf("Host cancelled the track and the room is back to the host's last pick (%s)\n",
+				!Room_NoTuningPick(ri) ? "weapon tuning" : !Room_NoLapPick(ri) ? "the laps" : "the track");
 
 			struct SG_Header sg;
 			sg.type = SG_TRACKCANCEL;
@@ -4050,6 +4564,9 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 				printf("Host %.*s (%d) turned player voting %s\n",
 					NAME_LEN, &ri->peerInfos[peerID].name[0], peerID, ri->votingOff ? "off" : "on");
 
+				// (any of the three votes: off mid lap or WEAPON TUNING vote,
+				// the track - and laps - voted so far are dropped with it, and
+				// the host picks everything again, from the track list)
 				if (ri->votingOff && ri->votePhase != VOTE_NONE)
 				{
 					ri->votePhase = VOTE_NONE;
@@ -4114,8 +4631,10 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 		{
 			// A player's vote, or a change of it, in the vote running
 			// (Vote_*); the room shown it at once. The close is the tick's.
+			// (the vote running's rows: 18 tracks, 8 lap rows, WEAPON
+			// TUNING's 2 - a third tuning row is a modified client's)
 			struct CG_MessageVote* r = (struct CG_MessageVote*)recvBuf;
-			int options = ri->votePhase == VOTE_TRACK ? VOTE_TRACKS : VOTE_LAP_ROWS;
+			int options = VOTE_OPTIONS(ri->votePhase);
 
 			if (ri->votePhase != VOTE_NONE && r->phase == ri->votePhase && r->option >= options)
 			{
@@ -4251,6 +4770,14 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			// nobody can fire before SG_STARTRACE
 			if (!ri->boolRaceAll) break;
 
+			// a warp orb (item 9) in a BALANCED race in a room that rolls
+			// items (Orb_*, Matt 30 Oct 2026): the room's one orb - the one
+			// granted, or with none out an unasked one - from here; with
+			// another out it is not relayed and its fate is not set, so only
+			// its shooter has it and its end is dropped. Before the fate
+			// below, which would make it live.
+			if (r->weapon == 9 && !Orb_Shot(ri, peerID, r->serial)) break;
+
 			// a new shot, or a held shield let go (the same count again):
 			// what it places is live
 			ri->weaponFate[(peerID << 8) | r->serial] = WEAPON_LIVE;
@@ -4333,6 +4860,16 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 			if ((NET_EV_SERVER_MASK >> kind) & 1)
 			{
 				if (Suspect(peer, "a weapon event only the server sends")) enet_peer_disconnect(peer, 0);
+				break;
+			}
+
+			// the warp orb's ask and cancel (NET_ORB_*, PROJ_END's arguments
+			// past its ends', Matt 30 Oct 2026): the referee's alone
+			// (Orb_Event, which answers), first - an ask names a shot not
+			// fired yet, which the fate checks below would drop
+			if (kind == NET_EV_PROJ_END && r->arg >= NET_ORB_ASK)
+			{
+				Orb_Event(ri, peer, peerID, r);
 				break;
 			}
 
@@ -4526,9 +5063,60 @@ void ProcessReceiveEvent(ENetPeer* peer, ENetPacket* packet) {
 	}
 }
 
+// The pass's wait is here, on the server's socket (next release; a sleep of
+// a microsecond in main until then, SleepMicro). First whatever is there
+// already, without waiting: this call also sends what the last pass's clocks
+// queued (a countdown, a vote's close, the room list), so none of it waits on
+// the wait. Then, with nothing there, up to NET_WAIT_MS (SV_config.h) for a
+// packet, or NET_IDLE_WAIT_MS while nobody is connected (below): one ends it
+// the moment it arrives, and the clocks run as it runs out. Then everything
+// that has come in, as before: a relay a message queues goes out on a later
+// call of the drain, the first that finds no event left to hand over (ENet
+// sends only then; as in v1119). Once a pass, and never after an event: in a
+// race the next packet is never far behind, and a wait after each would keep
+// the clocks in ServerState_Tick from running. enet_socket_wait, not a
+// timeout to enet_host_service: its timeout is the kernel's own, relative
+// (ENet's runs on gettimeofday on Linux and macOS, which a step back of the
+// clock would stretch), and a signal ends it at once (poll's or select's
+// EINTR, which enet_socket_wait reports as ENET_SOCKET_WAIT_INTERRUPT,
+// enet/unix.c; ENet would wait out the rest). Only a signal that comes just
+// before the wait, or lands on another thread (the heartbeat's), waits it
+// out: a stop (SIGTERM) takes at most the wait, NET_IDLE_WAIT_MS with nobody
+// connected. A failure of ENet's (a send or a receive the system refused, or
+// the wait itself): a pause of NET_WAIT_MS, the short one even with nobody
+// connected, so that one that repeats cannot spin a core now that the wait
+// is the loop's only pause.
+//
+// Nobody connected is ENet's own count, connectedPeers, at 0. A connection
+// counts from the end of its handshake (its CONNECT event) until it starts
+// to close - an enet_peer_disconnect, a timeout, its own DISCONNECT - that
+// is, while it is CONNECTED or DISCONNECT_LATER (enet_peer_on_connect and
+// enet_peer_on_disconnect, enet/peer.c, called from
+// enet_protocol_change_state, enet/protocol.c, and from enet_peer_disconnect
+// and enet_peer_reset, enet/peer.c). A handshake under way is not
+// counted, but each of its steps is a packet, which ends the wait; nor is a
+// connection the server is closing, whose seat is kept until its DISCONNECT
+// event - with nobody else on, its room has nobody left to play, and only
+// ENet's resend of the disconnect can run late, by the longer wait.
+// Backfill's bots (debug builds) are connections like any other, so they
+// keep the short wait.
+STATIC_ASSERT2(NET_WAIT_MS >= 1 && NET_WAIT_MS <= 10, "NET_WAIT_MS: 1 to 10 (0 would spin a core; longer has the clocks run late)");
+STATIC_ASSERT2(NET_IDLE_WAIT_MS >= NET_WAIT_MS && NET_IDLE_WAIT_MS <= 100, "NET_IDLE_WAIT_MS: NET_WAIT_MS to 100 (longer has a stop and the housekeeping run late)");
+
 void ProcessNewMessages() {
 	ENetEvent event;
-	while (enet_host_service(server, &event, 0) > 0)
+	enet_uint32 cond;
+	int got = enet_host_service(server, &event, 0);
+	if (got == 0)
+	{
+		cond = ENET_SOCKET_WAIT_RECEIVE | ENET_SOCKET_WAIT_INTERRUPT;
+		if (enet_socket_wait(server->socket, &cond,
+				(server->connectedPeers == 0) ? NET_IDLE_WAIT_MS : NET_WAIT_MS) != 0)
+			got = -1;
+		else if (cond & ENET_SOCKET_WAIT_RECEIVE)
+			got = enet_host_service(server, &event, 0);
+	}
+	for (; got > 0; got = enet_host_service(server, &event, 0))
 	{
 		switch (event.type)
 		{
@@ -4621,6 +5209,9 @@ void ProcessNewMessages() {
 
 		enet_packet_destroy(event.packet);
 	}
+
+	if (got < 0)
+		SleepMicro(NET_WAIT_MS * 1000LL);
 }
 
 // Same banner as the client: a screenshot of either window says which build
@@ -5020,6 +5611,14 @@ void ServerState_FirstBoot(int argc, char** argv)
 			// without it
 			watchLog = 1;
 		}
+		else if (strcmp(argv[i], "--orblog") == 0)
+		{
+			// the warp orb's referee in the log (Orb_*, Matt 30 Oct 2026:
+			// BALANCED races), every ask, answer, shot and end: for testing
+			// only, as --kicklog - a shot not relayed, a go-ahead never used
+			// and an orb with no end heard are logged without it
+			orbLog = 1;
+		}
 		else if (strcmp(argv[i], "--nospectate") == 0)
 		{
 			// no race in progress can be watched (1110, SPECTATE_ENABLED,
@@ -5249,9 +5848,12 @@ void ServerState_FirstBoot(int argc, char** argv)
 }
 
 // Snapshot the room occupancy for the heartbeat and hand it to the worker
-// thread. Rate limited to roughly once a second: the caller runs in a
-// SleepMicro(1) loop, so publishing unconditionally would take the lock millions
-// of times a second for data that is posted every 30.
+// thread. Rate limited to roughly once a second: the caller runs on every
+// pass of the main loop, about a thousand a second (fewer while the server
+// is empty: each pass waits on the network for at most NET_WAIT_MS, or
+// NET_IDLE_WAIT_MS with nobody connected, ProcessNewMessages), so
+// publishing unconditionally would take the lock that often for data that
+// is posted every 30.
 static void Heartbeat_Sample(void)
 {
 	// Once a second, on ENet's millisecond clock: unsigned, so the
@@ -5361,11 +5963,13 @@ static void ResetRoomAfterRace(RoomInfo* ri)
 	ri->levelPlayed = 0;
 	ri->boolRoomLocked = 0;
 	ri->trackVoted = 0;
+	ri->tuningPlayed = TUNING_BALANCED;   // (the next round's comes with its track: Room_TrackIn)
 	ri->boolLoadAll = 0;
 	ri->boolRaceAll = 0;
 	ri->boolEndAll = 0;
 	memset(ri->weaponFate, 0, sizeof(ri->weaponFate));
 	memset(ri->weaponHolds, 0, sizeof(ri->weaponHolds));
+	Orb_Clear(ri, 0);   // (no warp orb out, Orb_*: the ROMs drop theirs outside a race, as their weapons)
 	ri->endTime = 0;
 	ri->firstEndTime = 0;
 	ri->watchDeadline = 0;
@@ -5475,6 +6079,11 @@ void ServerState_Tick()
 		// contested touches whose wait is up (WeaponHold_*)
 		WeaponHold_Tick(ri);
 
+		// the room's warp orb ended, or its time up (Orb_*, BALANCED): after
+		// the messages, so a final word on it read this tick has gone out
+		// first
+		Orb_Tick(ri);
+
 		// the racers' pings to the room, once a second (Ping_Tick, 1114)
 		Ping_Tick(ri);
 
@@ -5557,6 +6166,7 @@ void ServerState_Tick()
 				int kickWiped = 0;
 				memset(ri->weaponFate, 0, sizeof(ri->weaponFate));
 				memset(ri->weaponHolds, 0, sizeof(ri->weaponHolds));
+				Orb_Clear(ri, 0);   // (nor a warp orb out, Orb_*: the ROMs reset theirs at the race's wait)
 				for (int k = 0; k < MAX_CLIENTS; k++)
 				{
 					ri->peerInfos[k].maskShotAt = 0;
@@ -5817,13 +6427,16 @@ int main(int argc, char** argv)
 	// instead, below. Unbuffered would cost a system call per character.)
 
 #ifdef _WIN32
-	// The loop below sleeps a microsecond between ticks (SleepMicro, SV_helper.c),
-	// which Windows rounds up to its timer's period. ENet asks for 1 ms
-	// (enet_initialize, enet/win32.c), so a tick is about 1 ms -
-	// but Windows 11 ignores that for a process it thinks is in the
-	// background (a minimised console, a service), back to 15.6 ms a tick,
-	// unless the process opts out: done here. Looked up at run time, so the
-	// exe still starts where the call does not exist (Windows 7).
+	// The loop below waits on the network for up to NET_WAIT_MS a pass
+	// (NET_IDLE_WAIT_MS with nobody connected; ProcessNewMessages; select, in
+	// enet/win32.c), which Windows rounds up to its timer's period. ENet asks
+	// for 1 ms (enet_initialize, enet/win32.c), so a quiet pass with players
+	// on is about 1 ms - but Windows 11 ignores that for a process it thinks
+	// is in the background (a minimised console, a service), back to 15.6 ms
+	// a pass, unless the process opts out: done here. (A packet ends the wait
+	// at once either way; it is the clocks that would run late.) Looked up at
+	// run time, so the exe still starts where the call does not exist
+	// (Windows 7).
 	#ifdef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
 	{
 		typedef BOOL (WINAPI *SetProcInfo_t)(HANDLE, PROCESS_INFORMATION_CLASS, LPVOID, DWORD);
@@ -5858,9 +6471,11 @@ int main(int argc, char** argv)
 	}
 #endif
 
+	// No sleep here (SleepMicro(1) until the next release): a pass waits on
+	// the network, for at most NET_WAIT_MS (NET_IDLE_WAIT_MS with nobody
+	// connected), in ProcessNewMessages
 	while (!g_stopSignal)
 	{
-		SleepMicro(1);
 		ServerState_Tick();
 #if BACKFILL_PLAYERS > 0
 		Backfill_Tick();

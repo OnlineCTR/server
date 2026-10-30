@@ -25,8 +25,8 @@
 // that leaves those alone bumps only VERSION, and every server already
 // running keeps accepting the new client; a release that touches them bumps
 // both, and that one is a server release too.
-#define VERSION 1119   // (1116: 28 Oct, the client's checks fixed - no server change, SERVER_VERSION stayed 1115; 1117: the private room's CONNECTING, the spectator's WATCHERS; 1118: the region list's count in its title, CONNECTING from it, the watched kart's lap chime - no server change, SERVER_VERSION stays 1117; 1119: the warp orb's near tie at the kart it hits, and SERVER_VERSION 1119 with it)
-#define SERVER_VERSION 1119   // (1117 until 1119: Matt, 29 Oct - a server release so that every player and server updates to the same game; a new signing key pair: make_key.py, launcher 4.4)
+#define VERSION 1121   // (1116: 28 Oct, the client's checks fixed - no server change, SERVER_VERSION stayed 1115; 1117: the private room's CONNECTING, the spectator's WATCHERS; 1118: the region list's count in its title, CONNECTING from it, the watched kart's lap chime - no server change, SERVER_VERSION stays 1117; 1119: the warp orb's near tie at the kart it hits, and SERVER_VERSION 1119 with it; 1120: Europe West and Europe North (Mexico's place, open) - no server change, SERVER_VERSION stays 1119; 1121: Peru in Beta's place (country 7, every build), the lobby clock that stuck at RETURNING TO LOBBY IN 1 after a CANCEL crossed the start, WEAPON TUNING (the vote after the laps: ORIGINAL or BALANCED odds) and BALANCED's warp orb rules (one on the track, the server's go-ahead first, the 4 s gap, its speed) - SERVER_VERSION 1121 with it)
+#define SERVER_VERSION 1121   // (1119 until 1121: Matt, 31 Oct - WEAPON TUNING and the warp orb's go-ahead change the protocol; 1119's signing key kept, so no new launcher: see CG_MessageRoom's signed join)
 
 // The server's SV_main.c names the protocol it was written for (SV_PROTOCOL,
 // defined before it includes this header; 1111). One from another release
@@ -59,8 +59,10 @@
 // shield too. 10 (1110): a squish (NET_CLAIM_HIT(3, 5)) claimed the same
 // way, mask or not (the server takes one from a player whose kart it saw
 // with Saffi, FLAME_SAFFI, or who fired a TURBO lately), and Saffi's blue
-// sent apart from TAG YOU'RE IT's "it" Saffi (FLAME_SAFFI).
-#define NET_WEAPON_EVENTS 10
+// sent apart from TAG YOU'RE IT's "it" Saffi (FLAME_SAFFI). 11 (Matt, 30 Oct
+// 2026): one warp orb on the track at a time in a BALANCED room, the server's
+// go-ahead first (NET_ORB_*, on NET_EV_PROJ_END).
+#define NET_WEAPON_EVENTS 11
 
 // The game modes of room rows 2-5 (POTION GAME, BOMBARDMENT, ELIMINATION,
 // TAG YOU'RE IT): the server referees every knockout from the karts' own
@@ -81,8 +83,10 @@
 // The players' vote for the track and then the laps (vote.c, SV_main.c's
 // Vote_*): SG_VOTE (in the old SG_SERVERCLOSED's place), CG_VOTE, and the
 // host's PLAYER VOTING (HOST_ACTION_VOTING). SV_main.c checks for this to
-// catch a stale global.h.
-#define NET_VOTING 1
+// catch a stale global.h. 2: WEAPON TUNING after the laps (VOTE_TUNING,
+// SG_MessageVote's phaseHi and lap, SG/CG_MessageTrack's tuning; Matt,
+// 30 Oct 2026).
+#define NET_VOTING 2
 
 // The kart message's lap word and number (CG/SG_EverythingKart.lap and .seq,
 // NET_LAP_* below; 1104): every machine ranks the other players' karts by
@@ -114,16 +118,38 @@
 // until the green).
 #define NET_SPECTATE 2
 
-// A vote: VOTE_NONE (the host picks, or no pick due), VOTE_TRACK, VOTE_LAPS.
-// Each runs VOTE_SECONDS, or until every player has voted (the server's
-// --votesecs, for testing), over the VOTE_TRACKS race tracks of the track
-// list (menu.c, NUM_TRACKS) and the VOTE_LAP_ROWS lap rows (LAP_COUNT_BY_ID).
+// A vote: VOTE_NONE (the host picks, or no pick due), VOTE_TRACK, VOTE_LAPS,
+// VOTE_TUNING. Each runs VOTE_SECONDS, or until every player has voted (the
+// server's --votesecs, for testing), over the VOTE_TRACKS race tracks of the
+// track list (menu.c, NUM_TRACKS), the VOTE_LAP_ROWS lap rows
+// (LAP_COUNT_BY_ID) and the VOTE_TUNING_ROWS rows of WEAPON TUNING. 3 is
+// SG_VOTE's VOTE_KICK_REPLY, never a room's vote, so WEAPON TUNING is 4: on
+// the wire SG_MessageVote's phase and phaseHi (SG_VOTE_PHASE).
 #define VOTE_NONE      0
 #define VOTE_TRACK     1
 #define VOTE_LAPS      2
+#define VOTE_TUNING    4
 #define VOTE_SECONDS   30
 #define VOTE_TRACKS    18
 #define VOTE_LAP_ROWS  8
+#define VOTE_TUNING_ROWS 2
+// the rows of a vote (0 for none: VOTE_NONE, a phase no vote has)
+#define VOTE_OPTIONS(phase) ((phase) == VOTE_TRACK ? VOTE_TRACKS : (phase) == VOTE_LAPS ? VOTE_LAP_ROWS : \
+	(phase) == VOTE_TUNING ? VOTE_TUNING_ROWS : 0)
+
+// WEAPON TUNING (Matt, 30 Oct 2026), voted after the laps or picked by the
+// host after LAP SELECT: the ? box's odds for the race. ORIGINAL the retail
+// NTSC-U game's (its tables and its rules; lastPlace.c), BALANCED
+// OnlineCTR's own (lastPlace.c's raceOdds, 1st and last place's tables).
+// The room's is TUNING_* - 0 BALANCED, so a server or a message that says
+// nothing of it (a zeroed field, octr's boot memset) leaves the odds as they
+// were - and the list's rows are TUNING_ROW_*, in the order Matt named them.
+#define TUNING_BALANCED     0
+#define TUNING_ORIGINAL     1
+#define TUNING_ROW_ORIGINAL 0
+#define TUNING_ROW_BALANCED 1
+#define TUNING_FROM_ROW(row) (((row) == TUNING_ROW_ORIGINAL) ? TUNING_ORIGINAL : TUNING_BALANCED)
+#define TUNING_ROW_OF(t)     (((t) == TUNING_ORIGINAL) ? TUNING_ROW_ORIGINAL : TUNING_ROW_BALANCED)
 
 // The ROM's vote box (vote.c): the list this far left of the host's list's
 // place, the VOTES column at its right, the box round both centred where the
@@ -172,6 +198,10 @@
 #define INTERP_DRV_SAVE(slot)  (0x807FD490u + 12u * (unsigned int)(slot))   // Vec3: this step's, while the half step is drawn
 #define INTERP_DRV_PTR(slot)   (0x807FD520u + 4u * (unsigned int)(slot))    // the Driver the row was last kept for
 #define INTERP_DRV_STAMP(slot) (0x807FD550u + 4u * (unsigned int)(slot))    // gGT->timer then
+
+// A beta build: QUICK PLAY always searches, never NO GAMES AVAILABLE
+// (Home_Step, home.c). Its server list is every build's since Beta was
+// retired (30 Oct 2026; until then Beta alone, the other rows greyed).
 //#define ONLINE_BETA_MODE
 
 // Post-race countdown drawn under RACE COMPLETE (seconds until the server
@@ -253,6 +283,19 @@
 #define ROOM_ROW_NO_ITEMS_USF 6
 #define ROOM_IS_ITEMS(rn) (ROOM_ROW(rn) != ROOM_ROW_NO_ITEMS && ROOM_ROW(rn) != ROOM_ROW_NO_ITEMS_USF)
 #define ROOM_IS_RETRO(rn) (ROOM_ROW(rn) >= ROOM_ROW_NO_ITEMS_USF)
+// The game modes' rooms whose ? box gives one weapon (VehPhysGeneral_
+// SetHeldItem): POTION GAME a beaker (4), BOMBARDMENT a bomb (1), TAG YOU'RE
+// IT a missile (2), round or no round. A nibble a row, row 0 the lowest; 0
+// the game's roll.
+#define ROOM_FORCED_ITEMS ((4 << (4 * ROOM_ROW_POTION_GAME)) | (1 << (4 * ROOM_ROW_BOMBARDMENT)) | (2 << (4 * ROOM_ROW_TAG)))
+#define ROOM_FORCED_ITEM(rn) ((ROOM_FORCED_ITEMS >> (4 * ROOM_ROW(rn))) & 0xf)
+// A room whose ? boxes roll their item (CLASSIC, ELIMINATION, CLASSIC USF):
+// the only ones with WEAPON TUNING, voted or picked. The others have no
+// tuning page, and their races take TUNING_BALANCED.
+#define ROOM_ROLLS_ITEMS(rn) (ROOM_IS_ITEMS(rn) && ROOM_FORCED_ITEM(rn) == 0)
+// ELIMINATION and TAG YOU'RE IT: no laps to pick (the server's
+// Room_NoLapPick; the ROM's lap page locks itself, lobbyBusy.c).
+#define ROOM_NO_LAP_PICK(rn) (ROOM_ROW(rn) == ROOM_ROW_ELIMINATION || ROOM_ROW(rn) == ROOM_ROW_TAG)
 // a game mode's room (gameModes.c, the server's Round_*): POTION GAME,
 // BOMBARDMENT, ELIMINATION, TAG YOU'RE IT
 #define ROOM_IS_MODE(rn) (ROOM_ROW(rn) >= ROOM_ROW_POTION_GAME && ROOM_ROW(rn) <= ROOM_ROW_TAG)
@@ -267,7 +310,7 @@
 #define ROOM_OPEN_INDEX(rn) ((rn) < ROOM_PAGES_OPEN * ROOM_PAGE_ROWS)
 // a room list row's text, "TAG YOU'RE IT - 12/12", with its 0 and the space
 // menu.c writes after the count and cuts off beside two digits; and a
-// region list row's, "AUSTRALIA  999MS  999 ONLINE" and its 0 (ServerList_Rows,
+// region list row's, "EUROPE NORTH  999MS  999 ONLINE" and its 0 (ServerList_Rows,
 // home.c), which share the buffer (roomRows, in Mods4.c)
 #define ROOM_LABEL_SIZE 36   // (29 until 1117: the room rows' ULTRA SACRED FIRE kinds - menu.c; the buffer in ModsC since, home.c)
 
@@ -448,6 +491,30 @@ STATIC_ASSERT2(MAX_NUM_PLAYERS <= ROOM_PLAYERS(0xFF) &&
 #define NET_EV_PING       15  // 1114, server -> clients only, once a second in a race (Ping_Tick): clientID the player, arg its round trip to the server in ms / 4 (ENet's smoothed estimate, 255 at most, never 0 once known); identity its own client ID. The ROM keeps it by slot (netPingMs4, netLap.c) for the warp orb's tie reach (NetOrb_Tie): the other player's half trip, which the ROM could not know until now
 #define NET_EV_COUNT      16
 #define NET_CLAIM_HIT(type, reason) ((type) | ((reason) << 3))   // NET_EV_KART_CLAIM's count
+
+// One warp orb on the track at a time in a BALANCED room that rolls items
+// (Matt, 30 Oct 2026; NET_WEAPON_EVENTS 11): the server's go-ahead before an
+// orb is fired, carried on NET_EV_PROJ_END with arguments past its ends'
+// (0-3), on the orb's identity - its shooter, and the count its shot will
+// have (ShotPose[0].serial + 1).
+//   NET_ORB_ASK    ROM -> server, sent tentative (NET_EV_TENTATIVE): may this
+//                  orb be fired? The client lets the server's answer to it
+//                  through as its own echo (g_tentSent).
+//   NET_ORB_GO     server -> every racer, clientID and owner the asker: yes -
+//                  the asker fires it; to everyone else an orb is out (no
+//                  orb from a ? box until it has gone: lastPlace.c).
+//   NET_ORB_NO     server -> the asker alone: no, another orb is out (or the
+//                  asker is out of the round) - the orb becomes a mask (Matt).
+//   NET_ORB_CANCEL ROM -> server: a go-ahead that could not be used (the orb
+//                  lost, or its fire window over); server -> every racer,
+//                  clientID the owner: that grant or orb is over (a timeout,
+//                  the owner gone) - everybody drops it, and ends any copy of
+//                  it quietly.
+// The orb's own end (PROJ_END 0-3, DESTROYED) frees the track as ever.
+#define NET_ORB_ASK    4
+#define NET_ORB_GO     5
+#define NET_ORB_NO     6
+#define NET_ORB_CANCEL 7
 // the kinds only the server sends: refused from a client
 #define NET_EV_SERVER_MASK ((1 << NET_EV_OUT) | (1 << NET_EV_IT) | (1 << NET_EV_LIVES) | (1 << NET_EV_PING))
 // For the server: the kinds that end an identity (the first one relayed,
@@ -580,6 +647,19 @@ struct OnlineCTR
 
 	// 0x29 + MAX_NUM_PLAYERS
 	char nameBuffer[MAX_NUM_PLAYERS][NAME_LEN + 1]; //+1 for nullterm
+
+	// 0x95, the three bytes of alignment before raceStats (Matt, 30 Oct
+	// 2026: WEAPON TUNING). weaponTuning is the room's, TUNING_*: written
+	// by the client from SG_TRACK (the vote's or the host's pick), 0 -
+	// BALANCED - from SG_NEWCLIENT and SG_TRACKCANCEL until then; read by
+	// the ROM at each roll (lastPlace.c). tuningPick and boolLockedInTuning
+	// are the host's WEAPON TUNING page's pick (its row, TUNING_ROW_*) and
+	// lock (tuning.c, through menu.c's OnlineMenu_Lock), as lapID and
+	// boolLockedInLap are LAP SELECT's: the client sends the track at this
+	// lock, the last of the host's picks (StatePC_Lobby_HostTrackPick).
+	unsigned char weaponTuning;
+	unsigned char tuningPick;
+	unsigned char boolLockedInTuning;
 
 	raceStats raceStats[MAX_NUM_PLAYERS];
 
@@ -721,7 +801,8 @@ struct OnlineCTR
 	// Players on each server by its octr->serverCountry number, from the
 	// site's status feed (PlayersOnline_Tick, CL_main.cpp), beside each
 	// region on the server list (ServerList_Rows, home.c). -1 where the
-	// feed has nothing to say (not fetched yet, the site unreachable, Beta).
+	// feed has nothing to say (not fetched yet, the site unreachable; and
+	// Beta, with no feed id, until it was retired - 30 Oct 2026).
 	// Written by the client every loop - every slot but PRIVATE_ROOM_INDEX's,
 	// which holds the private room's address from the ROM's keypad (1115,
 	// OCTR_PRIVATE_ADDR).
@@ -754,12 +835,13 @@ struct OnlineCTR
 	// ROM's keypad (1115, OCTR_PRIVATE_PORT).
 	int serverPing[8];
 
-	// The room's vote for the track and laps (vote.c), from the server's
-	// SG_VOTE by the client: whether the room votes at all (the host's
-	// PLAYER VOTING), the vote running (VOTE_*), and each player's vote by
-	// client ID (the row's option + 1; 0 none). The track a lap vote is for
-	// goes in levelID. voteCast is the ROM's own vote for the client to
-	// send (CG_VOTE): VOTE_* << 8 | (option + 1), 0 none.
+	// The room's vote for the track, laps and WEAPON TUNING (vote.c), from
+	// the server's SG_VOTE by the client: whether the room votes at all (the
+	// host's PLAYER VOTING), the vote running (VOTE_*), and each player's
+	// vote by client ID (the row's option + 1; 0 none). The track a lap or
+	// tuning vote is for goes in levelID, and a tuning vote's voted laps in
+	// gGT->numLaps (SG_MessageVote.lap). voteCast is the ROM's own vote for
+	// the client to send (CG_VOTE): VOTE_* << 8 | (option + 1), 0 none.
 	int voteEnabled;
 	int votePhase;
 	int voteCast;
@@ -830,6 +912,12 @@ STATIC_ASSERT2(sizeof(struct OnlineCTR) <= 0x400, "Size of OnlineCTR must be lte
 #include <stddef.h>
 #define OCTR_OFFSETOF(m) offsetof(struct OnlineCTR, m)
 #endif
+// WEAPON TUNING's three bytes in the alignment gap before raceStats (30 Oct
+// 2026), nothing after them moved
+STATIC_ASSERT2(OCTR_OFFSETOF(weaponTuning) == 0x95, "OnlineCTR layout: weaponTuning");
+STATIC_ASSERT2(OCTR_OFFSETOF(tuningPick) == 0x96, "OnlineCTR layout: tuningPick");
+STATIC_ASSERT2(OCTR_OFFSETOF(boolLockedInTuning) == 0x97, "OnlineCTR layout: boolLockedInTuning");
+STATIC_ASSERT2(OCTR_OFFSETOF(raceStats) == 0x98, "OnlineCTR layout: raceStats");
 // the alignment gap's two fields (1110), between a char and an int
 STATIC_ASSERT2(OCTR_OFFSETOF(lastWindowsClientSync) == 0x168, "OnlineCTR layout: lastWindowsClientSync");
 STATIC_ASSERT2(OCTR_OFFSETOF(watchers) == 0x169, "OnlineCTR layout: watchers");
@@ -868,15 +956,13 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 
 // The servers a player can pick, by octr->serverCountry number, which Quick
 // Play asks (QuickPlay_ProbeThread, CL_main.cpp): the region list's rows
-// not greyed (NewPage_ServerCountry, menu.c, which keeps its own test for
-// Mods1's bytes - change the two together). Mexico (2) has nobody hosting
-// it for now (5, Singapore until 1114, is USA East, open); a beta build
-// has Beta (7) alone, and the private room (6) is never a row.
-#ifdef ONLINE_BETA_MODE
-#define SERVER_OPEN(c) ((c) == 7)
-#else
-#define SERVER_OPEN(c) ((c) != 2 && (c) < 6)
-#endif
+// (NewPage_ServerCountry, menu.c, which greys none - change the two
+// together). All seven regions are open, in every build (1120: 2 is Europe
+// North, Mexico until then, which nobody hosted and both kept closed; 5,
+// Singapore until 1114, is USA East; 7 is Peru from the next build, Matt,
+// 30 Oct 2026 - Beta's until then, which a beta build had alone, ((c) == 7),
+// and a public build never listed); the private room (6) is never a row.
+#define SERVER_OPEN(c) ((c) < 6 || (c) == 7)   // ((c) < 6 until 30 Oct 2026, ((c) != 2 && (c) < 6) until 1120)
 
 // The server list state's screens (lobbyView, logo.c; home.c): HOME, the
 // first - MAIN MENU: QUICK PLAY, SERVER BROWSER, PRIVATE ROOM, ABOUT - then the region
@@ -939,7 +1025,7 @@ STATIC_ASSERT2(NET_EV_COUNT <= 16, "NET_EV_* kinds: 4 bits on the wire, and the 
 #define BACK_NONE          0
 #define BACK_LEAVE_ROOM    1  // drop the connection; the ROM re-picks the same server, so the room list comes back
 #define BACK_LEAVE_SERVER  2  // drop the connection; back to the server list
-#define BACK_CANCEL_TRACK  3  // host in the character pick: CG_TRACKCANCEL, the whole room goes back to the lap pick
+#define BACK_CANCEL_TRACK  3  // host in the character pick: CG_TRACKCANCEL, the whole room goes back to the host's last pick (WEAPON TUNING, else LAP SELECT or the track list: Lobby_BackPick, tuning.c)
 #define BACK_CANCEL_CONNECT 4 // the private room's connection (its address from the ROM's keypad, 1115): the client drops a connection it had begun; back to the server list
 
 // octr->kickedNotice
@@ -1235,8 +1321,10 @@ enum ServerGiveMessageType
 
 	// "the host has cancelled the track" (CG_TRACKCANCEL, TRIANGLE in the
 	// character pick). Header only. Everybody's character lock is off: the
-	// host is back on the lap pick, the guests back to waiting on the host,
-	// and the host's idle clock follows in SG_IDLECOUNTDOWN.
+	// host is back on their last pick (WEAPON TUNING, or LAP SELECT or the
+	// track list in a room without it: Lobby_BackPick, tuning.c), the guests
+	// back to waiting on the host, and the host's idle clock follows in
+	// SG_IDLECOUNTDOWN.
 	SG_TRACKCANCEL,
 
 	// what happened to a placed weapon (CG_WEAPONEVENT, NET_EV_*), relayed
@@ -1279,21 +1367,28 @@ struct SG_MessageHost
 struct SG_MessageVote
 {
 	unsigned char type : 4;
-	unsigned char phase : 2;     // VOTE_*
+	unsigned char phase : 2;     // VOTE_*'s low two bits (SG_VOTE_PHASE)
 	unsigned char enabled : 1;   // the host's PLAYER VOTING
-	unsigned char padding : 1;
+	unsigned char phaseHi : 1;   // VOTE_*'s third bit (NET_VOTING 2): VOTE_TUNING is phase 0, phaseHi 1
 
 	unsigned char seconds;       // the vote's time left, 0 with none running
-	unsigned char track;         // the track voted in (VOTE_LAPS)
+	unsigned char track : 5;     // the track voted in (VOTE_LAPS, VOTE_TUNING)
+	unsigned char lap : 3;       // and its lap row (VOTE_TUNING), as SG_MessageTrack's
 
 	// each player's vote by client ID: the option + 1, 0 none
 	unsigned char votes[MAX_NUM_PLAYERS];
 };
 
+// The vote an SG_VOTE that is not VOTE_KICK_REPLY says is running: test for
+// the kick reply first (SG_MessageKickVote's phase, the same two bits),
+// whose result's high bit sits where phaseHi does.
+#define SG_VOTE_PHASE(m) ((m)->phase | ((m)->phaseHi << 2))
+
 // SG_VOTE with phase VOTE_KICK_REPLY (1110): the server's answer to one
 // player's VOTE TO KICK, to that player alone - the room never hears of a
 // vote, only of the kick when the count is reached (the empty SG_NAME of a
-// disconnect). Never a room's votePhase.
+// disconnect). Never a room's votePhase, which VOTE_TUNING's low two bits
+// (0) keep apart from it.
 #define VOTE_KICK_REPLY  3
 #define KICKVOTE_CAST    1
 #define KICKVOTE_REMOVED 2
@@ -1410,7 +1505,11 @@ struct SG_MessageTrack
 	// the room's vote put the track in (Vote_Finish), not the host's pick:
 	// the host cannot take it back (CG_TRACKCANCEL; octr->trackVoted)
 	unsigned char voted : 1;
-	unsigned char padding : 3;
+	// the race's WEAPON TUNING, TUNING_* (octr->weaponTuning; NET_VOTING 2):
+	// voted or the host's, TUNING_BALANCED in a room without it
+	// (ROOM_ROLLS_ITEMS)
+	unsigned char tuning : 1;
+	unsigned char padding : 2;
 
 	unsigned char trackID : 5;
 	unsigned char lapID : 3;
@@ -1723,7 +1822,12 @@ struct CG_MessageRoom
 // (OCTR_CLIENT_PUBKEY, SV_config.h) and refuses any other join as it refuses
 // another SERVER_VERSION: the room list back, nothing else; a few in a row
 // from one address and it is kept off the server for a while (SV_auth.c).
-// A new key with every SERVER_VERSION. (OCTR_AUTH_NONCE_LEN, OCTR_AUTH_SIG_LEN
+// A new key with a SERVER_VERSION, as a rule (1117, 1119: an old launcher's
+// key refused, so every player updates it) - but not always: 1121 kept
+// 1119's (Matt, 31 Oct 2026: no new launcher). The launcher signs whatever
+// the client hands it, the version in it too, so 1119's launchers sign 1121's
+// joins, and an older client is still refused for its SERVER_VERSION, signed
+// or not. (OCTR_AUTH_NONCE_LEN, OCTR_AUTH_SIG_LEN
 // and OCTR_AUTH_MSG_LEN: with PRIVATE_ROOM_INDEX above, ahead of both
 // structs.)
 
@@ -1741,7 +1845,10 @@ struct CG_MessageTrack
 {
 	// 15 types, 15 bytes max
 	unsigned char type : 4;
-	unsigned char padding : 4;
+	// the host's WEAPON TUNING, TUNING_* (NET_VOTING 2): the server takes
+	// TUNING_BALANCED in a room without it (ROOM_ROLLS_ITEMS)
+	unsigned char tuning : 1;
+	unsigned char padding : 3;
 
 	unsigned char trackID : 5;
 	unsigned char lapID : 3;
@@ -1859,12 +1966,12 @@ struct CG_MessageHostAction
 	char name[NAME_LEN];
 };
 
-// A player's vote: the option (a track's level ID, a lap row) for the
-// vote running.
+// A player's vote: the option (a track's level ID, a lap row, a WEAPON
+// TUNING row) for the vote running.
 struct CG_MessageVote
 {
 	unsigned char type : 4;
-	unsigned char phase : 4;    // VOTE_TRACK or VOTE_LAPS: the vote it is for
+	unsigned char phase : 4;    // VOTE_TRACK, VOTE_LAPS or VOTE_TUNING: the vote it is for
 	unsigned char option;
 };
 

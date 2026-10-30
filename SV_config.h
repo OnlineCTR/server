@@ -47,6 +47,44 @@
 
 // ----------------------------------------------------------------- clocks
 
+// The main loop's wait on the network, in milliseconds (ProcessNewMessages,
+// SV_main.c; next release - until then it slept a microsecond between
+// passes, about 17,000 a second on Linux, which had a server nobody was on
+// use 11% of a desktop's core and 28% of a one-core VPS). A packet ends the
+// wait the moment it arrives, so this is not how long a message waits: it is
+// how late, at most, a clock is seen to run out while nothing comes in - a
+// vote's, a load's, a held weapon touch's, and ENet's own resends and pings,
+// which move on only while the server services the network - and how long a
+// stop (SIGTERM) can take. This one while anybody is connected; with nobody
+// connected, NET_IDLE_WAIT_MS (below). 1: the resolution of those clocks
+// (enet_time_get) and the pass a Windows server already ran (its timer's
+// period, which ENet sets to 1 ms). A longer wait does save CPU: a quiet
+// pass's cost is ENet's walk over every one of the host's MAX_PEERS slots,
+// taken or not, each time the server services the network
+// (enet_protocol_send_outgoing_commands, enet/protocol.c), so a quiet
+// server's CPU goes with how many passes it makes (the numbers are at
+// NET_IDLE_WAIT_MS) - but it would have those clocks run late for everybody
+// playing. 1 to 10, checked as the server compiles.
+#ifndef NET_WAIT_MS
+#define NET_WAIT_MS 1
+#endif
+
+// The same wait while nobody is connected (ENet's connectedPeers is 0;
+// ProcessNewMessages, SV_main.c, says which connections it counts; next
+// release). Longer, because then no room has anybody to play, and a
+// connecting player's first packet ends the wait at once, as any packet
+// does. What it can make late is only the server's own housekeeping - a kick
+// ban's end, the heartbeat's sample (once a second) - ENet's resend of a
+// handshake's or a disconnect's step, and a stop (SIGTERM) whose signal
+// misses the wait. Measured on an i9 under WSL (runs on three occasions), a
+// server nobody was on used about 1.2 to 3% of a core with the 1 ms wait
+// and 0.2 to 0.7% with 10 ms (11.6% with v1119's microsecond sleep), most
+// of it ENet's walk over the slots: a tenth of the passes, each dearer after
+// the longer sleep. NET_WAIT_MS to 100, checked as the server compiles.
+#ifndef NET_IDLE_WAIT_MS
+#define NET_IDLE_WAIT_MS 10
+#endif
+
 // Seconds a finished room sits on the results screen before everybody is sent
 // back to the lobby. Travels to the clients in SG_LOBBYCOUNTDOWN so the game
 // counts down the same number; this define is the only place it lives.
@@ -146,6 +184,37 @@
 #define HOLD_MAX_MS    250   // never longer: a player that slow is not waited on
 #endif
 
+// ---------------------------------------- one warp orb on the track (BALANCED)
+
+// One warp orb on the track at a time in a BALANCED race in a room that
+// rolls items (Matt, 30 Oct 2026; Orb_*, SV_main.c). A go-ahead is its
+// asker's to use for their round trip and ORB_GRANT_MARGIN_MS - the GO is
+// half a round trip on its way, the ROM takes it up to 5 s after its ask and
+// fires within a second of it once the kart can (ORB_ASK_STEPS,
+// ORB_FIRE_STEPS: netWeapons.c), the shot is half a round trip on its way
+// back - never longer than ORB_GRANT_MAX_MS; unused by then it is called off
+// (NET_ORB_CANCEL to the room) and the track is free again. Both outlast the
+// ROM's 6 s: its own client drops the server's CANCEL as its echo, so a
+// go-ahead called off any sooner could still be fired, on nobody else's
+// screen. A ROM that cannot use its go-ahead calls it off itself at once.
+// An orb shot is taken as out until its end is relayed, ORB_LIVE_MAX_MS at
+// most (an end never heard: its shot refused on its own machine, its copies
+// gone quietly) - the ROM's own safety clock on it runs a few seconds longer
+// - and ORB_LEFT_MS more at most once its owner has left (its copies fly on
+// and can still hit).
+#ifndef ORB_GRANT_MARGIN_MS
+#define ORB_GRANT_MARGIN_MS 7000
+#endif
+#ifndef ORB_GRANT_MAX_MS
+#define ORB_GRANT_MAX_MS    8000
+#endif
+#ifndef ORB_LIVE_MAX_MS
+#define ORB_LIVE_MAX_MS     60000
+#endif
+#ifndef ORB_LEFT_MS
+#define ORB_LEFT_MS         15000
+#endif
+
 // -------------------------------------------------------------- heartbeat
 
 // Seconds between posts to the site, unless OCTR_HEARTBEAT_INTERVAL says
@@ -186,9 +255,10 @@
 #endif
 
 // Received data ENet may queue for one connection before the tick reads it
-// (ServerState_Tick runs about every millisecond). Past this, that
-// connection's further packets are dropped until the queue drains - a
-// reliable one is sent again by its sender. 4 KB is over 200 kart messages.
+// (ServerState_Tick runs about every millisecond while anybody is connected,
+// NET_WAIT_MS). Past this, that connection's further packets are dropped
+// until the queue drains - a reliable one is sent again by its sender. 4 KB
+// is over 200 kart messages.
 // ENet's default is 32 MB.
 #ifndef MAX_WAITING_BYTES
 #define MAX_WAITING_BYTES 4096
@@ -251,13 +321,17 @@
 // The signed join (1115; global.h's OCTR_AUTH_*, SV_auth.c). The release's
 // client public key: every join must carry a signature the launcher made
 // with the matching private key, which only the OnlineCTR team holds. A new
-// pair with every SERVER_VERSION (tools/Launcher/make_key.py in the game's
-// tree writes this line); a server built with another release's key
-// refuses every join, so this header and global.h come from one release.
+// pair with a SERVER_VERSION as a rule (tools/Launcher/make_key.py in the
+// game's tree prints the two lines), or the last release's kept - 1121 kept
+// 1119's, so 1119's launchers sign its joins (Matt, 31 Oct 2026: no new
+// launcher); OCTR_CLIENT_PUBKEY_SERVER_VERSION names the release either way.
+// A server built with another release's key refuses every join, so this
+// header and global.h come from one release.
 // Running with OCTR_OPEN_SERVER=1 in the environment takes unsigned joins
 // too (a private server for a client built by hand): said at start-up,
 // and never on a public server.
 #define OCTR_CLIENT_PUBKEY_VERSION 1119
+#define OCTR_CLIENT_PUBKEY_SERVER_VERSION 1121   // the release this file is for (SV_auth.c checks it against SERVER_VERSION): 1121 kept 1119's key (Matt, 31 Oct 2026: no new launcher)
 #define OCTR_CLIENT_PUBKEY { 0x87, 0xe2, 0xf0, 0x5a, 0x85, 0xac, 0x93, 0xbe, 0xbb, 0xe3, 0x5d, 0xf1, 0xef, 0x23, 0x42, 0x19, 0x65, 0x73, 0x3c, 0xff, 0xac, 0xe8, 0x5f, 0x9c, 0x92, 0x67, 0x33, 0x28, 0xb2, 0x63, 0xad, 0x59 }
 
 // A join refused for its signature counts against its address: this many
